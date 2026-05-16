@@ -102,5 +102,4 @@ dist/
 
 *.tmp
 *.temp
-
-app/services/langchain_rag_service.py
+ 
