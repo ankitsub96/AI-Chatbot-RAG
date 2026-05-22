@@ -19,16 +19,16 @@ def create_embedding(text: str):
 
 def create_embeddings(
     texts: list[str],
+    batch_size: int = 8,
     show_progress_bar: bool = False,
 ):
-
     embeddings = embedding_model.encode(
         texts,
+        batch_size=batch_size,
         show_progress_bar=show_progress_bar,
     )
 
     embeddings = np.array(embeddings).astype("float32")
-
     faiss.normalize_L2(embeddings)
 
     return embeddings

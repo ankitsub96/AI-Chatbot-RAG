@@ -53,8 +53,8 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
 
     file_size = len(file_bytes)
 
-    stored_filename = f"{file_size}_{file_hash}_{file.filename}"
-
+    base_name = os.path.splitext(file.filename)[0]
+    stored_filename = f"{base_name}_{file_hash}_{file_size}.pdf"
     # -------------------------
     # CHECK IF ALREADY INDEXED
     # -------------------------

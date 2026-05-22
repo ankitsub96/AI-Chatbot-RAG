@@ -1,8 +1,15 @@
 import os
+
+os.environ["UNSTRUCTURED_SKIP_TORCH"] = "1"
 import json
-import fitz
 import asyncio
 from fastapi import HTTPException, BackgroundTasks
+import numpy as np
+from unstructured.partition.pdf import partition_pdf
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import logging
+
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 from app.config.settings import MODEL, TOP_K, CHUNK_SIZE
 from app.services.vector_service import embedding_model
@@ -30,23 +37,193 @@ from app.services.vector_search_service import (
 )
 
 # =========================
-# CHUNKING
+# CHUNKING CONFIG
 # =========================
 
+CHUNK_SIZE = 5000
+CHUNK_OVERLAP = 800
+# merge multiple pages before chunking
+PAGE_WINDOW_SIZE = 2
 
-def chunk_text(text, chunk_size=400):
+# =========================
+# EMBEDDING CONFIG
+# =========================
 
-    words = text.split()
+EMBEDDING_BATCH_SIZE = 8  # reduce if laptop struggles (try 4)
+CHECKPOINT_EVERY = 50  # embed and report every N chunks
+# =========================================================
+# SPLITTER
+# =========================================================
 
-    chunks = []
+"""
+IMPORTANT:
 
-    for i in range(0, len(words), chunk_size):
+Do NOT split aggressively by sentences.
 
-        chunk_words = words[i : i + chunk_size]
+Sentence splitting creates:
+- tiny chunks
+- weak semantic continuity
+- too many embeddings
+- poor retrieval for long-form content
 
-        chunks.append(" ".join(chunk_words))
+This splitter prioritizes:
+1. paragraphs
+2. new lines
+3. spaces
 
-    return chunks
+Works well for:
+- books
+- documentation
+- reports
+- PDFs
+- conversational text
+"""
+text_splitter = RecursiveCharacterTextSplitter(
+    # separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""],
+    # separators=["\n\n", "\n", "\t", " ", ""],
+    separators=[
+        "\n\n",
+        "\n",
+        "\t",
+    ],
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+)
+
+table_splitter = RecursiveCharacterTextSplitter(
+    separators=["\n\n", "\n", " | ", " ", ""],
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+)
+
+code_splitter = RecursiveCharacterTextSplitter(
+    separators=["\n\n", "\n", ";", "{", "}", " ", ""],
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=50,
+)
+
+markdown_splitter = RecursiveCharacterTextSplitter(
+    separators=["## ", "# ", "\n\n", "\n", ". ", " ", ""],
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+)
+
+# =========================================================
+# PAGE GROUPING
+# =========================================================
+
+
+def group_pages(
+    pages: list[dict],
+    window_size: int = PAGE_WINDOW_SIZE,
+):
+    """
+    Merge nearby pages together before chunking.
+
+    WHY:
+    Important context often spans multiple pages.
+
+    Benefits:
+    - better semantic continuity
+    - fewer chunks
+    - faster embeddings
+    - smaller FAISS indexes
+    - better retrieval quality
+    """
+
+    grouped_pages = []
+
+    for start in range(0, len(pages), window_size):
+
+        batch = pages[start : start + window_size]
+
+        combined_text = "\n\n".join(page["text"] for page in batch).strip()
+
+        grouped_pages.append(
+            {
+                "page": batch[0]["page"],
+                "text": combined_text,
+            }
+        )
+
+    print(f"\nGrouped {len(pages)} pages into " f"{len(grouped_pages)} page groups")
+
+    return grouped_pages
+
+
+# =========================================================
+# CHUNKING
+# =========================================================
+
+
+def chunk_pages(grouped_pages: list[dict]):
+    """
+    Split grouped pages into semantic chunks.
+    """
+
+    print(f"\nChunking {len(grouped_pages)} grouped pages...")
+
+    documents = []
+
+    for page_group in grouped_pages:
+
+        chunks = text_splitter.split_text(page_group["text"])
+
+        for chunk in chunks:
+
+            documents.append(
+                {
+                    "page": page_group["page"],
+                    "text": chunk,
+                }
+            )
+
+    print(f"Total chunks created: {len(documents)}")
+
+    return documents
+
+
+# =========================================================
+# COMPLETE DOCUMENT PROCESSING PIPELINE
+# =========================================================
+
+
+def process_document_pages(pages: list[dict]):
+    """
+    Full document chunking pipeline.
+
+    FLOW:
+
+    Extracted Pages
+        ↓
+    Group Nearby Pages
+        ↓
+    Recursive Chunking
+        ↓
+    Final Chunks
+    """
+
+    print("\n" + "=" * 80)
+    print("DOCUMENT CHUNKING PIPELINE")
+    print("=" * 80)
+
+    grouped_pages = group_pages(pages)
+
+    documents = chunk_pages(grouped_pages)
+
+    print("\nChunking pipeline complete")
+
+    print(
+        {
+            "original_pages": len(pages),
+            "grouped_pages": len(grouped_pages),
+            "final_chunks": len(documents),
+        }
+    )
+
+    print("=" * 80)
+
+    return documents
 
 
 # =========================
@@ -54,17 +231,48 @@ def chunk_text(text, chunk_size=400):
 # =========================
 
 
-def extract_pdf_text(pdf_path):
+def extract_pdf_text(pdf_path: str) -> list[dict]:
 
-    doc = fitz.open(pdf_path)
+    print("\nExtracting PDF with Unstructured (fast mode)...")
 
-    pages = []
+    elements = partition_pdf(
+        pdf_path,
+        strategy="fast",
+        include_page_breaks=True,
+    )
 
-    for page_num, page in enumerate(doc):
+    extracted = []
+    current_page = 1
+    last_section = ""
 
-        pages.append({"page": page_num + 1, "text": page.get_text()})
+    for el in elements:
 
-    return pages
+        el_type = type(el).__name__
+
+        if el_type == "PageBreak":
+            current_page += 1
+            continue
+
+        text = el.text.strip() if el.text else ""
+
+        if not text:
+            continue
+
+        if el_type in ("Title", "Header"):
+            last_section = text
+
+        extracted.append(
+            {
+                "page": current_page,
+                "type": el_type,
+                "section": last_section,
+                "text": text,
+            }
+        )
+
+    print(f"Extracted {len(extracted)} elements across {current_page} pages")
+
+    return extracted
 
 
 # =========================
@@ -90,56 +298,73 @@ def build_vector_database(filename: str):
 
     pages = extract_pdf_text(pdf_path)
 
-    documents = []
+    # =========================================================
+    # PAGE GROUPING
+    # =========================================================
 
-    # =========================
+    grouped_pages = group_pages(pages)
+
+    # =========================================================
     # CHUNKING
-    # =========================
+    # =========================================================
 
-    print("\nChunking document...")
-
-    for page_data in pages:
-
-        chunks = chunk_text(
-            page_data["text"],
-            CHUNK_SIZE,
-        )
-
-        for chunk in chunks:
-
-            documents.append(
-                {
-                    "page": page_data["page"],
-                    "text": chunk,
-                }
-            )
-
-    print(f"\nTotal chunks created: {len(documents)}")
+    documents = chunk_pages(grouped_pages)
 
     # =========================
     # EMBEDDING TEXT PREP
     # =========================
 
     texts = [f"""
-Represent this document for retrieval.
+        Represent this document for retrieval.
 
-Page {doc['page']}
+        Page:
+        {doc.get('page', '')}
 
-{doc['text']}
-""" for doc in documents]
+        Section:
+        {doc.get('section', '')}
+
+        Type:
+        {doc.get('type', '')}
+
+        Content:
+        {doc['text']}
+        """ for doc in documents]
 
     # =========================
-    # EMBEDDINGS
+    # BATCH EMBEDDINGS WITH CHECKPOINTING
     # =========================
 
-    print("\nGenerating embeddings...")
-
-    embeddings = create_embeddings(
-        texts,
-        show_progress_bar=True,
+    print(f"\nGenerating embeddings...")
+    print(
+        f"Batch size: {EMBEDDING_BATCH_SIZE} | "
+        f"Checkpoint every: {CHECKPOINT_EVERY} chunks"
     )
 
-    print({"embedding_shape": embeddings.shape})
+    all_embeddings = []
+    total = len(texts)
+
+    for i in range(0, total, CHECKPOINT_EVERY):
+
+        batch_texts = texts[i : i + CHECKPOINT_EVERY]
+
+        print(
+            f"\nEmbedding chunks {i + 1}–{min(i + CHECKPOINT_EVERY, total)} "
+            f"of {total}..."
+        )
+
+        batch_embeddings = create_embeddings(
+            batch_texts,
+            batch_size=EMBEDDING_BATCH_SIZE,
+            show_progress_bar=True,
+        )
+
+        all_embeddings.append(batch_embeddings)
+
+        print(f"Done — {batch_embeddings.shape[0]} vectors embedded")
+
+    embeddings = np.vstack(all_embeddings)
+
+    print(f"\nFinal embedding shape: {embeddings.shape}")
 
     # =========================
     # INDEX CREATION
@@ -160,15 +385,9 @@ Page {doc['page']}
     # =========================
 
     index_path = get_index_path(filename)
-
     metadata_path = get_metadata_path(filename)
 
-    print(
-        {
-            "index_path": index_path,
-            "metadata_path": metadata_path,
-        }
-    )
+    print({"index_path": index_path, "metadata_path": metadata_path})
 
     # =========================
     # SAVE INDEX
@@ -176,10 +395,7 @@ Page {doc['page']}
 
     print("\nSaving FAISS index...")
 
-    save_faiss_index(
-        index,
-        index_path,
-    )
+    save_faiss_index(index, index_path)
 
     # =========================
     # SAVE METADATA
@@ -187,29 +403,16 @@ Page {doc['page']}
 
     print("\nSaving metadata...")
 
-    with open(
-        metadata_path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        json.dump(
-            documents,
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(documents, f, ensure_ascii=False, indent=2)
 
     print("\n" + "=" * 80)
     print("VECTOR DATABASE READY")
     print("=" * 80)
 
-    print(f"Saved index: {index_path}")
-
-    print(f"Saved metadata: {metadata_path}")
-
+    print(f"Saved index:          {index_path}")
+    print(f"Saved metadata:       {metadata_path}")
     print(f"Total chunks indexed: {len(documents)}")
-
     print("=" * 80)
 
 
