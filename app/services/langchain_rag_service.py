@@ -9,6 +9,8 @@ from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from typing import List
+from langchain_groq import ChatGroq
+
 
 from app.services.memory_service import (
     retrieve_relevant_memories,
@@ -34,8 +36,13 @@ llm = ChatGoogleGenerativeAI(
     temperature=0,
     google_api_key=os.getenv("GEMINI_API_KEY"),
 )
+llmGroq = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0,
+    api_key=os.getenv("GROQ_API_KEY"),
+)
 
-TOP_K = 5
+TOP_K = 50
 
 # ── retriever ────────────────────────────────────────────────────────────────
 
@@ -155,13 +162,17 @@ async def ask_document_langchain(
         documents=documents,
         query_embedding=query_embedding,
     )
-
     # =========================
     # CHAIN
     # =========================
+    safe_memory_context = (
+        (memory_context or "No previous conversations.")
+        .replace("{", "{{")
+        .replace("}", "}}")
+    )
 
     prompt = PromptTemplate(
-        input_variables=["memory_context", "context", "question"],
+        input_variables=["safe_memory_context", "context", "question"],
         template=f"""
         You are a helpful PDF assistant.
 
@@ -171,7 +182,7 @@ async def ask_document_langchain(
         ==================================================
         RELEVANT PAST CONVERSATIONS
         ==================================================
-        {memory_context or "No previous conversations."}
+        {safe_memory_context or "No previous conversations."}
 
         ==================================================
         DOCUMENT CONTEXT
@@ -186,7 +197,8 @@ async def ask_document_langchain(
     )
 
     chain = RetrievalQA.from_chain_type(
-        llm=llm,
+        # llm=llm,
+        llm=llmGroq,
         retriever=retriever,
         chain_type="stuff",
         chain_type_kwargs={
