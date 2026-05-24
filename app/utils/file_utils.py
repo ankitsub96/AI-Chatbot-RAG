@@ -57,3 +57,7 @@ def write_text_file(path: str, content: str):
     with open(path, "w", encoding="utf-8") as f:
 
         f.write(content)
+
+
+def get_bm25_path(filename: str) -> str:
+    return os.path.join("app/vector_store/bm25", f"{os.path.splitext(filename)[0]}.pkl")

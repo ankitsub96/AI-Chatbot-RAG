@@ -51,6 +51,8 @@ class FaissRetriever(BaseRetriever):
     index: object
     documents: list
     query_embedding: object
+    query: str = ""
+    bm25_index: object = None
 
     def _get_relevant_documents(
         self,
@@ -59,12 +61,25 @@ class FaissRetriever(BaseRetriever):
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
 
-        results = semantic_search(
-            index=self.index,
-            metadata=self.documents,
-            query_embedding=self.query_embedding,
-            top_k=TOP_K,
-        )
+        if self.bm25_index is not None:
+
+            results = hybrid_search(
+                faiss_index=self.index,
+                bm25_index=self.bm25_index,
+                metadata=self.documents,
+                query_embedding=self.query_embedding,
+                query=self.query,
+                top_k=TOP_K,
+            )
+
+        else:
+
+            results = semantic_search(
+                index=self.index,
+                metadata=self.documents,
+                query_embedding=self.query_embedding,
+                top_k=TOP_K,
+            )
 
         return [
             Document(
@@ -149,10 +164,17 @@ async def ask_document_langchain(
     # PARALLEL LOAD
     # =========================
 
-    print("\nLoading index and memory in parallel...")
+    print("\nLoading index, BM25, and memory in parallel...")
 
-    (index, documents), memory_context = await asyncio.gather(
+    bm25_path = get_bm25_path(filename)
+
+    (index, documents), bm25_index, memory_context = await asyncio.gather(
         asyncio.to_thread(load_index_and_metadata, index_path, metadata_path),
+        (
+            asyncio.to_thread(load_bm25_index, bm25_path)
+            if os.path.exists(bm25_path)
+            else asyncio.sleep(0, result=None)
+        ),
         asyncio.to_thread(retrieve_relevant_memories, session_id, question),
     )
 
@@ -164,6 +186,8 @@ async def ask_document_langchain(
         index=index,
         documents=documents,
         query_embedding=query_embedding,
+        query=question,
+        bm25_index=bm25_index,
     )
 
     # =========================

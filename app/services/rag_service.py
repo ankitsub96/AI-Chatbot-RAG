@@ -41,6 +41,13 @@ from app.services.pdf_service import (
     process_document_pages,
     extract_pdf_text,
 )
+from app.services.vector_search_service import (
+    build_bm25_index,
+    save_bm25_index,
+    load_bm25_index,
+    hybrid_search,
+)
+from app.utils.file_utils import get_bm25_path
 
 # =========================
 # EMBEDDING CONFIG
@@ -55,7 +62,7 @@ CHECKPOINT_EVERY = 50  # embed and report every N chunks
 
 
 @timer
-def build_vector_database(filename: str):
+async def build_vector_database(filename: str):
 
     pdf_path = f"app/uploads/{filename}"
 
@@ -147,10 +154,26 @@ def build_vector_database(filename: str):
 
     print("\nCreating FAISS HNSW index...")
 
-    index = create_hnsw_index(
-        embeddings=embeddings,
-        hnsw_m=32,
-        ef_construction=200,
+    # index = create_hnsw_index(
+    #     embeddings=embeddings,
+    #     hnsw_m=32,
+    #     ef_construction=200,
+    # )
+    faiss_task = asyncio.to_thread(
+        create_hnsw_index,
+        embeddings,
+        32,
+        200,
+    )
+
+    bm25_task = asyncio.to_thread(
+        build_bm25_index,
+        documents,
+    )
+
+    index, bm25_index = await asyncio.gather(
+        faiss_task,
+        bm25_task,
     )
 
     print({"total_vectors": index.ntotal})
@@ -161,6 +184,7 @@ def build_vector_database(filename: str):
 
     index_path = get_index_path(filename)
     metadata_path = get_metadata_path(filename)
+    bm25_path = get_bm25_path(filename)
 
     print({"index_path": index_path, "metadata_path": metadata_path})
 
@@ -170,16 +194,18 @@ def build_vector_database(filename: str):
 
     print("\nSaving FAISS index...")
 
-    save_faiss_index(index, index_path)
-
-    # =========================
-    # SAVE METADATA
-    # =========================
-
-    print("\nSaving metadata...")
-
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(documents, f, ensure_ascii=False, indent=2)
+    await asyncio.gather(
+        asyncio.to_thread(save_faiss_index, index, index_path),
+        asyncio.to_thread(save_bm25_index, bm25_index, bm25_path),
+        asyncio.to_thread(
+            lambda: json.dump(
+                documents,
+                open(metadata_path, "w", encoding="utf-8"),
+                ensure_ascii=False,
+                indent=2,
+            )
+        ),
+    )
 
     print("\n" + "=" * 80)
     print("VECTOR DATABASE READY")
@@ -291,10 +317,18 @@ async def ask_document(
 
     print("\nLoading retrieval systems in parallel...")
 
+    bm25_path = get_bm25_path(filename)
+
     index_metadata_task = asyncio.to_thread(
         load_index_and_metadata,
         index_path,
         metadata_path,
+    )
+
+    bm25_task = (
+        asyncio.to_thread(load_bm25_index, bm25_path)
+        if os.path.exists(bm25_path)
+        else asyncio.sleep(0, result=None)
     )
 
     memory_task = asyncio.to_thread(
@@ -310,10 +344,12 @@ async def ask_document(
 
     (
         index_metadata,
+        bm25_index,
         memory_context,
         summary,
     ) = await asyncio.gather(
         index_metadata_task,
+        bm25_task,
         memory_task,
         summary_task,
     )
@@ -321,27 +357,44 @@ async def ask_document(
     index, documents = index_metadata
 
     # =========================
-    # VECTOR SEARCH
+    # HYBRID SEARCH
     # =========================
 
     print("\nRunning vector similarity search...")
 
-    results = semantic_search(
-        index=index,
-        metadata=documents,
-        query_embedding=query_embedding,
-        top_k=TOP_K,
-    )
+    if bm25_index is not None:
+
+        print("Mode: Hybrid (FAISS + BM25)")
+
+        results = hybrid_search(
+            faiss_index=index,
+            bm25_index=bm25_index,
+            metadata=documents,
+            query_embedding=query_embedding,
+            query=question,
+            top_k=TOP_K,
+        )
+
+    else:
+
+        print("Mode: Semantic only (BM25 index not found)")
+
+        results = semantic_search(
+            index=index,
+            metadata=documents,
+            query_embedding=query_embedding,
+            top_k=TOP_K,
+        )
 
     context = ""
 
     print("\n" + "=" * 80)
-    print("VECTOR SEARCH RESULTS")
+    print("SEARCH RESULTS")
     print("=" * 80)
 
     for rank, result in enumerate(results, start=1):
 
-        distance = result["score"]
+        score = result["score"]
 
         doc = result["data"]
 
@@ -351,7 +404,11 @@ async def ask_document(
 
         print(f"Page: {doc['page']}")
 
-        print(f"Similarity Score: {distance}")
+        print(f"Score: {score}")
+
+        if bm25_index is not None:
+            print(f"FAISS Score: {result.get('faiss_score', 'n/a')}")
+            print(f"BM25 Score:  {result.get('bm25_score', 'n/a')}")
 
         print("\nCHUNK:")
 
