@@ -6,6 +6,7 @@ from fastapi import (
     File,
     BackgroundTasks,
 )
+from fastapi.responses import StreamingResponse
 
 from app.services.rag_service import (
     build_vector_database,
@@ -118,11 +119,27 @@ async def ask_pdf(payload: AskDocumentRequest, background_tasks: BackgroundTasks
 
 @router.post("/ask/langchain")
 async def ask_pdf_langchain(
-    payload: AskDocumentRequest, background_tasks: BackgroundTasks
+    payload: AskDocumentRequest,
+    background_tasks: BackgroundTasks,
+    stream: bool = False,
 ):
     answer = await ask_document_langchain(
-        payload.filename, payload.question, payload.session_id, background_tasks
+        payload.filename,
+        payload.question,
+        payload.session_id,
+        background_tasks,
+        stream=stream,
     )
+    if stream:
+        return StreamingResponse(
+            answer,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return {"answer": answer}
 
 

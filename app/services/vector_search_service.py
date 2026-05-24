@@ -1,9 +1,12 @@
 import json
 import faiss
 import numpy as np
-import faiss
+from sentence_transformers import SentenceTransformer
 
-from app.services.vector_service import embedding_model
+from app.config.settings import EMBED_MODEL
+from app.utils.helpers import timer
+
+embedding_model = SentenceTransformer(EMBED_MODEL)
 
 
 def create_embedding(text: str):
@@ -68,6 +71,7 @@ def semantic_search(
     return results
 
 
+@timer
 def create_hnsw_index(
     embeddings,
     hnsw_m: int = 32,
@@ -101,6 +105,7 @@ def create_flat_index(embeddings):
     return index
 
 
+@timer
 def save_faiss_index(index, path: str):
 
     faiss.write_index(index, path)

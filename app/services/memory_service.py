@@ -2,8 +2,6 @@ import os
 import json
 import asyncio
 
-from app.config.settings import MODEL
-from app.services.vector_service import embedding_model
 from app.services.llm_service import generate_response
 from app.services.vector_search_service import (
     create_embedding,
@@ -15,7 +13,6 @@ from app.services.vector_search_service import (
     load_faiss_index,
 )
 
-# from app.services.vector_service
 
 from app.utils.file_utils import save_json_file, load_json_file, write_text_file
 

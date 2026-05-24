@@ -11,10 +11,10 @@ import logging
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
-from app.config.settings import MODEL, TOP_K, CHUNK_SIZE
-from app.services.vector_service import embedding_model
+from app.config.settings import TOP_K, CHUNK_SIZE
 from app.services.llm_service import generate_response
 from app.utils.file_utils import get_index_path, get_metadata_path, load_documents
+from app.utils.helpers import timer
 from app.services.semantic_cache_service import (
     get_exact_cache,
     get_semantic_cache,
@@ -35,15 +35,12 @@ from app.services.vector_search_service import (
     save_faiss_index,
     load_faiss_index,
 )
-
-# =========================
-# CHUNKING CONFIG
-# =========================
-
-CHUNK_SIZE = 5000
-CHUNK_OVERLAP = 800
-# merge multiple pages before chunking
-PAGE_WINDOW_SIZE = 2
+from app.services.pdf_service import (
+    group_pages,
+    chunk_pages,
+    process_document_pages,
+    extract_pdf_text,
+)
 
 # =========================
 # EMBEDDING CONFIG
@@ -51,235 +48,13 @@ PAGE_WINDOW_SIZE = 2
 
 EMBEDDING_BATCH_SIZE = 8  # reduce if laptop struggles (try 4)
 CHECKPOINT_EVERY = 50  # embed and report every N chunks
-# =========================================================
-# SPLITTER
-# =========================================================
-
-"""
-IMPORTANT:
-
-Do NOT split aggressively by sentences.
-
-Sentence splitting creates:
-- tiny chunks
-- weak semantic continuity
-- too many embeddings
-- poor retrieval for long-form content
-
-This splitter prioritizes:
-1. paragraphs
-2. new lines
-3. spaces
-
-Works well for:
-- books
-- documentation
-- reports
-- PDFs
-- conversational text
-"""
-text_splitter = RecursiveCharacterTextSplitter(
-    # separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""],
-    # separators=["\n\n", "\n", "\t", " ", ""],
-    separators=[
-        "\n\n",
-        "\n",
-        "\t",
-    ],
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-)
-
-table_splitter = RecursiveCharacterTextSplitter(
-    separators=["\n\n", "\n", " | ", " ", ""],
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-)
-
-code_splitter = RecursiveCharacterTextSplitter(
-    separators=["\n\n", "\n", ";", "{", "}", " ", ""],
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=50,
-)
-
-markdown_splitter = RecursiveCharacterTextSplitter(
-    separators=["## ", "# ", "\n\n", "\n", ". ", " ", ""],
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-)
-
-# =========================================================
-# PAGE GROUPING
-# =========================================================
-
-
-def group_pages(
-    pages: list[dict],
-    window_size: int = PAGE_WINDOW_SIZE,
-):
-    """
-    Merge nearby pages together before chunking.
-
-    WHY:
-    Important context often spans multiple pages.
-
-    Benefits:
-    - better semantic continuity
-    - fewer chunks
-    - faster embeddings
-    - smaller FAISS indexes
-    - better retrieval quality
-    """
-
-    grouped_pages = []
-
-    for start in range(0, len(pages), window_size):
-
-        batch = pages[start : start + window_size]
-
-        combined_text = "\n\n".join(page["text"] for page in batch).strip()
-
-        grouped_pages.append(
-            {
-                "page": batch[0]["page"],
-                "text": combined_text,
-            }
-        )
-
-    print(f"\nGrouped {len(pages)} pages into " f"{len(grouped_pages)} page groups")
-
-    return grouped_pages
-
-
-# =========================================================
-# CHUNKING
-# =========================================================
-
-
-def chunk_pages(grouped_pages: list[dict]):
-    """
-    Split grouped pages into semantic chunks.
-    """
-
-    print(f"\nChunking {len(grouped_pages)} grouped pages...")
-
-    documents = []
-
-    for page_group in grouped_pages:
-
-        chunks = text_splitter.split_text(page_group["text"])
-
-        for chunk in chunks:
-
-            documents.append(
-                {
-                    "page": page_group["page"],
-                    "text": chunk,
-                }
-            )
-
-    print(f"Total chunks created: {len(documents)}")
-
-    return documents
-
-
-# =========================================================
-# COMPLETE DOCUMENT PROCESSING PIPELINE
-# =========================================================
-
-
-def process_document_pages(pages: list[dict]):
-    """
-    Full document chunking pipeline.
-
-    FLOW:
-
-    Extracted Pages
-        ↓
-    Group Nearby Pages
-        ↓
-    Recursive Chunking
-        ↓
-    Final Chunks
-    """
-
-    print("\n" + "=" * 80)
-    print("DOCUMENT CHUNKING PIPELINE")
-    print("=" * 80)
-
-    grouped_pages = group_pages(pages)
-
-    documents = chunk_pages(grouped_pages)
-
-    print("\nChunking pipeline complete")
-
-    print(
-        {
-            "original_pages": len(pages),
-            "grouped_pages": len(grouped_pages),
-            "final_chunks": len(documents),
-        }
-    )
-
-    print("=" * 80)
-
-    return documents
-
-
-# =========================
-# PDF EXTRACTION
-# =========================
-
-
-def extract_pdf_text(pdf_path: str) -> list[dict]:
-
-    print("\nExtracting PDF with Unstructured (fast mode)...")
-
-    elements = partition_pdf(
-        pdf_path,
-        strategy="fast",
-        include_page_breaks=True,
-    )
-
-    extracted = []
-    current_page = 1
-    last_section = ""
-
-    for el in elements:
-
-        el_type = type(el).__name__
-
-        if el_type == "PageBreak":
-            current_page += 1
-            continue
-
-        text = el.text.strip() if el.text else ""
-
-        if not text:
-            continue
-
-        if el_type in ("Title", "Header"):
-            last_section = text
-
-        extracted.append(
-            {
-                "page": current_page,
-                "type": el_type,
-                "section": last_section,
-                "text": text,
-            }
-        )
-
-    print(f"Extracted {len(extracted)} elements across {current_page} pages")
-
-    return extracted
-
 
 # =========================
 # BUILD VECTOR DATABASE
 # =========================
 
 
+@timer
 def build_vector_database(filename: str):
 
     pdf_path = f"app/uploads/{filename}"

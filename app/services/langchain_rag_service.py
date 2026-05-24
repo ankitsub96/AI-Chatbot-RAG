@@ -1,6 +1,7 @@
 import os
 import asyncio
-
+import json
+from typing import AsyncGenerator
 from fastapi import HTTPException, BackgroundTasks
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.retrievers import BaseRetriever
@@ -28,6 +29,7 @@ from app.services.vector_search_service import (
     semantic_search,
 )
 from app.utils.file_utils import get_index_path, get_metadata_path
+from app.config.settings import TOP_K
 
 # ── shared instances ─────────────────────────────────────────────────────────
 
@@ -41,8 +43,6 @@ llmGroq = ChatGroq(
     temperature=0,
     api_key=os.getenv("GROQ_API_KEY"),
 )
-
-TOP_K = 50
 
 # ── retriever ────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,8 @@ async def ask_document_langchain(
     question: str,
     session_id: str,
     background_tasks: BackgroundTasks,
-) -> str:
+    stream: bool = False,
+) -> str | AsyncGenerator[str, None]:
 
     print("\n" + "=" * 80)
     print("LANGCHAIN ASK")
@@ -97,6 +98,13 @@ async def ask_document_langchain(
 
     if exact_cached:
         print("\nEXACT CACHE HIT")
+        if stream:
+
+            async def _exact_stream():
+                yield format_sse(json.dumps({"token": exact_cached}))
+                yield format_sse(json.dumps({"done": True}), event="done")
+
+            return _exact_stream()
         return exact_cached
 
     # =========================
@@ -115,6 +123,13 @@ async def ask_document_langchain(
 
     if semantic_cached:
         print("\nSEMANTIC CACHE HIT")
+        if stream:
+
+            async def _semantic_stream():
+                yield format_sse(json.dumps({"token": semantic_cached}))
+                yield format_sse(json.dumps({"done": True}), event="done")
+
+            return _semantic_stream()
         return semantic_cached
 
     # =========================
@@ -136,21 +151,9 @@ async def ask_document_langchain(
 
     print("\nLoading index and memory in parallel...")
 
-    index_metadata_task = asyncio.to_thread(
-        load_index_and_metadata,
-        index_path,
-        metadata_path,
-    )
-
-    memory_task = asyncio.to_thread(
-        retrieve_relevant_memories,
-        session_id,
-        question,
-    )
-
     (index, documents), memory_context = await asyncio.gather(
-        index_metadata_task,
-        memory_task,
+        asyncio.to_thread(load_index_and_metadata, index_path, metadata_path),
+        asyncio.to_thread(retrieve_relevant_memories, session_id, question),
     )
 
     # =========================
@@ -162,9 +165,11 @@ async def ask_document_langchain(
         documents=documents,
         query_embedding=query_embedding,
     )
+
     # =========================
-    # CHAIN
+    # PROMPT
     # =========================
+
     safe_memory_context = (
         (memory_context or "No previous conversations.")
         .replace("{", "{{")
@@ -172,7 +177,7 @@ async def ask_document_langchain(
     )
 
     prompt = PromptTemplate(
-        input_variables=["safe_memory_context", "context", "question"],
+        input_variables=["context", "question"],
         template=f"""
         You are a helpful PDF assistant.
 
@@ -182,7 +187,7 @@ async def ask_document_langchain(
         ==================================================
         RELEVANT PAST CONVERSATIONS
         ==================================================
-        {safe_memory_context or "No previous conversations."}
+        {safe_memory_context}
 
         ==================================================
         DOCUMENT CONTEXT
@@ -196,8 +201,46 @@ async def ask_document_langchain(
         """,
     )
 
+    # =========================
+    # BACKGROUND SAVE HELPER
+    # =========================
+
+    def schedule_saves(answer: str):
+        background_tasks.add_task(set_exact_cache, filename, question, answer)
+        background_tasks.add_task(
+            set_semantic_cache, filename, question, query_embedding, answer
+        )
+        background_tasks.add_task(save_conversation_turn, session_id, question, answer)
+
+    # =========================
+    # STREAM
+    # =========================
+
+    if stream:
+
+        async def _stream() -> AsyncGenerator[str, None]:
+
+            full_answer = ""
+
+            chain = {"context": retriever, "question": lambda x: x} | prompt | llmGroq
+
+            async for chunk in chain.astream(question):
+                token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if token:
+                    full_answer += token
+                    yield format_sse(json.dumps({"token": token}))
+
+            yield format_sse(json.dumps({"done": True}), event="done")
+
+            schedule_saves(full_answer)
+
+        return _stream()
+
+    # =========================
+    # JSON — RetrievalQA single call
+    # =========================
+
     chain = RetrievalQA.from_chain_type(
-        # llm=llm,
         llm=llmGroq,
         retriever=retriever,
         chain_type="stuff",
@@ -208,30 +251,18 @@ async def ask_document_langchain(
         output_key="result",
     )
 
-    # =========================
-    # RUN
-    # =========================
-
     print("\nRunning LangChain chain...")
 
-    result = await chain.ainvoke(
-        {
-            "query": question,
-        }
-    )
+    result = await chain.ainvoke({"query": question})
 
     answer = result["result"]
 
     print("\nANSWER GENERATED")
 
-    # =========================
-    # BACKGROUND TASKS
-    # =========================
-
-    background_tasks.add_task(set_exact_cache, filename, question, answer)
-    background_tasks.add_task(
-        set_semantic_cache, filename, question, query_embedding, answer
-    )
-    background_tasks.add_task(save_conversation_turn, session_id, question, answer)
+    schedule_saves(answer)
 
     return answer
+
+
+def format_sse(data: str, event: str = "message") -> str:
+    return f"event: {event}\ndata: {data}\n\n"
