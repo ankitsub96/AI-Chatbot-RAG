@@ -58,6 +58,7 @@ app/memory_store/*.json
 app/memory_store/*.txt
 app/vector_store/indexes/*
 app/vector_store/metadata/*
+app/vector_store/bm25
 
 # ============================================
 # UPLOADS

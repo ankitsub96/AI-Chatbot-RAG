@@ -28,8 +28,14 @@ from app.services.vector_search_service import (
     load_index_and_metadata,
     semantic_search,
 )
-from app.utils.file_utils import get_index_path, get_metadata_path
+from app.utils.file_utils import get_index_path, get_metadata_path, get_bm25_path
 from app.config.settings import TOP_K
+from app.services.vector_search_service import (
+    build_bm25_index,
+    save_bm25_index,
+    load_bm25_index,
+    hybrid_search,
+)
 
 # ── shared instances ─────────────────────────────────────────────────────────
 

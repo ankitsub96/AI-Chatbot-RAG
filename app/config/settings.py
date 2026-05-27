@@ -18,6 +18,6 @@ VECTOR_DIR = "app/vector_store"
 
 EMBED_MODEL = "BAAI/bge-base-en-v1.5"
 
-TOP_K = 50
+TOP_K = 30
 
 CHUNK_SIZE = 400
