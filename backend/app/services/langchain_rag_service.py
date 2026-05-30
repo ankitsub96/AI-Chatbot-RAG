@@ -9,8 +9,9 @@ from langchain_core.documents import Document
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from typing import List
+from typing import List, Optional
 from langchain_groq import ChatGroq
+from concurrent.futures import ThreadPoolExecutor
 
 
 from app.services.memory_service import (
@@ -54,11 +55,54 @@ llmGroq = ChatGroq(
 
 
 class FaissRetriever(BaseRetriever):
-    index: object
-    documents: list
+
+    indexes: list
+    document_sets: list[list]
+
     query_embedding: object
     query: str = ""
-    bm25_index: object = None
+
+    bm25_indexes: Optional[list] = None
+
+    def _search_single_document(
+        self,
+        doc_idx: int,
+    ):
+
+        index = self.indexes[doc_idx]
+
+        documents = self.document_sets[doc_idx]
+
+        bm25_index = None
+
+        if self.bm25_indexes and len(self.bm25_indexes) > doc_idx:
+            bm25_index = self.bm25_indexes[doc_idx]
+
+        print(
+            {
+                "document_set": doc_idx,
+                "chunks": len(documents),
+                "bm25_enabled": bm25_index is not None,
+            }
+        )
+
+        if bm25_index is not None:
+
+            return hybrid_search(
+                faiss_index=index,
+                bm25_index=bm25_index,
+                metadata=documents,
+                query_embedding=self.query_embedding,
+                query=self.query,
+                top_k=TOP_K,
+            )
+
+        return semantic_search(
+            index=index,
+            metadata=documents,
+            query_embedding=self.query_embedding,
+            top_k=TOP_K,
+        )
 
     def _get_relevant_documents(
         self,
@@ -67,32 +111,90 @@ class FaissRetriever(BaseRetriever):
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
 
-        if self.bm25_index is not None:
+        print("\n" + "=" * 80)
+        print("LANGCHAIN RETRIEVER")
+        print("=" * 80)
 
-            results = hybrid_search(
-                faiss_index=self.index,
-                bm25_index=self.bm25_index,
-                metadata=self.documents,
-                query_embedding=self.query_embedding,
-                query=self.query,
-                top_k=TOP_K,
+        # =========================
+        # PARALLEL SEARCH
+        # =========================
+
+        worker_count = min(
+            len(self.indexes),
+            8,
+        )
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+
+            search_results = list(
+                executor.map(
+                    self._search_single_document,
+                    range(len(self.indexes)),
+                )
             )
 
-        else:
+        # =========================
+        # MERGE
+        # =========================
 
-            results = semantic_search(
-                index=self.index,
-                metadata=self.documents,
-                query_embedding=self.query_embedding,
-                top_k=TOP_K,
+        all_results = []
+
+        for result_set in search_results:
+            all_results.extend(result_set)
+
+        print(
+            {
+                "documents_searched": len(self.indexes),
+                "total_candidates": len(all_results),
+            }
+        )
+
+        # =========================
+        # GLOBAL RERANK
+        # =========================
+
+        all_results.sort(
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+
+        all_results = all_results[:TOP_K]
+
+        print(
+            {
+                "final_results": len(all_results),
+            }
+        )
+
+        # =========================
+        # DEBUG
+        # =========================
+
+        for rank, result in enumerate(all_results, start=1):
+
+            print(
+                {
+                    "rank": rank,
+                    "score": result["score"],
+                    "page": result["data"].get("page"),
+                    "source_file": result["data"].get("source_file"),
+                }
             )
+
+        # =========================
+        # LANGCHAIN DOCUMENTS
+        # =========================
 
         return [
             Document(
-                page_content=r["data"]["text"],
-                metadata={"page": r["data"]["page"], "score": r["score"]},
+                page_content=result["data"]["text"],
+                metadata={
+                    "page": result["data"].get("page"),
+                    "source_file": result["data"].get("source_file"),
+                    "score": result["score"],
+                },
             )
-            for r in results
+            for result in all_results
         ]
 
 
@@ -100,7 +202,7 @@ class FaissRetriever(BaseRetriever):
 
 
 async def ask_document_langchain(
-    filename: str,
+    filenames: list[str],
     question: str,
     session_id: str,
     background_tasks: BackgroundTasks,
@@ -111,14 +213,30 @@ async def ask_document_langchain(
     print("LANGCHAIN ASK")
     print("=" * 80)
 
+    print(
+        {
+            "filenames": filenames,
+            "question": question,
+            "session_id": session_id,
+        }
+    )
+
+    # =========================
+    # CACHE KEY
+    # =========================
+
+    cache_key = "|".join(sorted(filenames))
+
     # =========================
     # EXACT CACHE
     # =========================
 
-    exact_cached = get_exact_cache(filename, question)
+    exact_cached = get_exact_cache(cache_key, question)
 
     if exact_cached:
+
         print("\nEXACT CACHE HIT")
+
         if stream:
 
             async def _exact_stream():
@@ -126,6 +244,7 @@ async def ask_document_langchain(
                 yield format_sse(json.dumps({"done": True}), event="done")
 
             return _exact_stream()
+
         return exact_cached
 
     # =========================
@@ -134,16 +253,24 @@ async def ask_document_langchain(
 
     print("\nGenerating query embedding...")
 
-    query_embedding = await asyncio.to_thread(create_embedding, question)
+    query_embedding = await asyncio.to_thread(
+        create_embedding,
+        question,
+    )
 
     # =========================
     # SEMANTIC CACHE
     # =========================
 
-    semantic_cached = get_semantic_cache(filename, query_embedding)
+    semantic_cached = get_semantic_cache(
+        cache_key,
+        query_embedding,
+    )
 
     if semantic_cached:
+
         print("\nSEMANTIC CACHE HIT")
+
         if stream:
 
             async def _semantic_stream():
@@ -151,49 +278,123 @@ async def ask_document_langchain(
                 yield format_sse(json.dumps({"done": True}), event="done")
 
             return _semantic_stream()
+
         return semantic_cached
 
     # =========================
     # FILE VALIDATION
     # =========================
 
-    index_path = get_index_path(filename)
-    metadata_path = get_metadata_path(filename)
+    for filename in filenames:
 
-    if not os.path.exists(index_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document '{filename}' is still processing",
-        )
+        index_path = get_index_path(filename)
+
+        metadata_path = get_metadata_path(filename)
+
+        if not os.path.exists(index_path):
+
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document '{filename}' is still processing",
+            )
+
+        if not os.path.exists(metadata_path):
+
+            raise HTTPException(
+                status_code=404,
+                detail=f"Metadata for '{filename}' is still processing",
+            )
 
     # =========================
     # PARALLEL LOAD
     # =========================
 
-    print("\nLoading index, BM25, and memory in parallel...")
+    print("\nLoading retrieval systems in parallel...")
 
-    bm25_path = get_bm25_path(filename)
+    document_tasks = []
 
-    (index, documents), bm25_index, memory_context = await asyncio.gather(
-        asyncio.to_thread(load_index_and_metadata, index_path, metadata_path),
-        (
-            asyncio.to_thread(load_bm25_index, bm25_path)
-            if os.path.exists(bm25_path)
-            else asyncio.sleep(0, result=None)
-        ),
-        asyncio.to_thread(retrieve_relevant_memories, session_id, question),
+    bm25_tasks = []
+
+    for filename in filenames:
+
+        index_path = get_index_path(filename)
+
+        metadata_path = get_metadata_path(filename)
+
+        bm25_path = get_bm25_path(filename)
+
+        document_tasks.append(
+            asyncio.to_thread(
+                load_index_and_metadata,
+                index_path,
+                metadata_path,
+            )
+        )
+
+        bm25_tasks.append(
+            (
+                asyncio.to_thread(load_bm25_index, bm25_path)
+                if os.path.exists(bm25_path)
+                else asyncio.sleep(0, result=None)
+            )
+        )
+
+    memory_task = asyncio.to_thread(
+        retrieve_relevant_memories,
+        session_id,
+        question,
+    )
+
+    all_document_results, all_bm25_indexes, memory_context = await asyncio.gather(
+        asyncio.gather(*document_tasks),
+        asyncio.gather(*bm25_tasks),
+        memory_task,
+    )
+
+    # =========================
+    # MERGE DOCUMENTS
+    # =========================
+
+    merged_indexes = []
+    document_sets = []
+
+    for filename, ((index, docs), bm25_index) in zip(
+        filenames,
+        zip(all_document_results, all_bm25_indexes),
+    ):
+
+        for doc in docs:
+
+            doc["source_file"] = filename
+
+        merged_indexes.append(index)
+
+        document_sets.append(docs)
+
+    print(
+        {
+            "documents_loaded": len(document_sets),
+            "files_loaded": len(filenames),
+        }
     )
 
     # =========================
     # RETRIEVER
     # =========================
-
+    print(type(document_sets))
+    print(type(document_sets[0]))
+    print(type(document_sets[0][0]))
     retriever = FaissRetriever(
-        index=index,
-        documents=documents,
+        # indexes=merged_indexes,
+        # documents=merged_documents,
+        # query_embedding=query_embedding,
+        # query=question,
+        # bm25_indexes=all_bm25_indexes,
+        indexes=merged_indexes,
+        document_sets=document_sets,
         query_embedding=query_embedding,
         query=question,
-        bm25_index=bm25_index,
+        bm25_indexes=all_bm25_indexes,
     )
 
     # =========================
@@ -209,26 +410,36 @@ async def ask_document_langchain(
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=f"""
-        You are a helpful PDF assistant.
+You are a helpful document assistant.
 
-        Use the context below to answer the question.
-        If uncertain, say: "I could not find that in the document."
+You may receive context from multiple documents.
 
-        ==================================================
-        RELEVANT PAST CONVERSATIONS
-        ==================================================
-        {safe_memory_context}
+Use:
+1. Retrieved document context
+2. Relevant conversation memory
 
-        ==================================================
-        DOCUMENT CONTEXT
-        ==================================================
-        {{context}}
+If uncertain say:
 
-        ==================================================
-        QUESTION
-        ==================================================
-        {{question}}
-        """,
+"I could not find that in the documents."
+
+==================================================
+RELEVANT PAST CONVERSATIONS
+==================================================
+
+{safe_memory_context}
+
+==================================================
+DOCUMENT CONTEXT
+==================================================
+
+{{context}}
+
+==================================================
+QUESTION
+==================================================
+
+{{question}}
+""",
     )
 
     # =========================
@@ -236,11 +447,28 @@ async def ask_document_langchain(
     # =========================
 
     def schedule_saves(answer: str):
-        background_tasks.add_task(set_exact_cache, filename, question, answer)
+
         background_tasks.add_task(
-            set_semantic_cache, filename, question, query_embedding, answer
+            set_exact_cache,
+            cache_key,
+            question,
+            answer,
         )
-        background_tasks.add_task(save_conversation_turn, session_id, question, answer)
+
+        background_tasks.add_task(
+            set_semantic_cache,
+            cache_key,
+            question,
+            query_embedding,
+            answer,
+        )
+
+        background_tasks.add_task(
+            save_conversation_turn,
+            session_id,
+            question,
+            answer,
+        )
 
     # =========================
     # STREAM
@@ -248,26 +476,46 @@ async def ask_document_langchain(
 
     if stream:
 
-        async def _stream() -> AsyncGenerator[str, None]:
+        async def _stream():
 
             full_answer = ""
 
-            chain = {"context": retriever, "question": lambda x: x} | prompt | llmGroq
+            chain = (
+                {
+                    "context": retriever,
+                    "question": lambda x: x,
+                }
+                | prompt
+                | llmGroq
+            )
 
             async for chunk in chain.astream(question):
-                token = chunk.content if hasattr(chunk, "content") else str(chunk)
-                if token:
-                    full_answer += token
-                    yield format_sse(json.dumps({"token": token}))
 
-            yield format_sse(json.dumps({"done": True}), event="done")
+                token = chunk.content if hasattr(chunk, "content") else str(chunk)
+
+                if token:
+
+                    full_answer += token
+
+                    yield format_sse(
+                        json.dumps(
+                            {
+                                "token": token,
+                            }
+                        )
+                    )
+
+            yield format_sse(
+                json.dumps({"done": True}),
+                event="done",
+            )
 
             schedule_saves(full_answer)
 
         return _stream()
 
     # =========================
-    # JSON — RetrievalQA single call
+    # JSON RESPONSE
     # =========================
 
     chain = RetrievalQA.from_chain_type(
@@ -283,7 +531,11 @@ async def ask_document_langchain(
 
     print("\nRunning LangChain chain...")
 
-    result = await chain.ainvoke({"query": question})
+    result = await chain.ainvoke(
+        {
+            "query": question,
+        }
+    )
 
     answer = result["result"]
 

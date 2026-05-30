@@ -247,7 +247,10 @@ def list_ready_documents():
 
 
 async def ask_document(
-    filename: str, question: str, session_id: str, background_tasks: BackgroundTasks
+    filenames: list[str],
+    question: str,
+    session_id: str,
+    background_tasks: BackgroundTasks,
 ):
 
     print("\n" + "=" * 80)

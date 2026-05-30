@@ -111,7 +111,7 @@ async def documents():
 async def ask_pdf(payload: AskDocumentRequest, background_tasks: BackgroundTasks):
 
     answer = await ask_document(
-        payload.filename, payload.question, payload.session_id, background_tasks
+        payload.filenames, payload.question, payload.session_id, background_tasks
     )
 
     return {"answer": answer}
@@ -124,7 +124,7 @@ async def ask_pdf_langchain(
     stream: bool = False,
 ):
     answer = await ask_document_langchain(
-        payload.filename,
+        payload.filenames,
         payload.question,
         payload.session_id,
         background_tasks,
