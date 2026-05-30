@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.controllers.extract_controller import router
 from app.controllers.rag_controller import (
@@ -24,3 +26,13 @@ app.add_exception_handler(
 app.include_router(router)
 
 app.include_router(rag_router)
+
+
+# ... all your existing routers ...
+
+# serve frontend static files
+app.mount("/assets", StaticFiles(directory="../frontend/dist/assets"), name="assets")
+
+@app.get("/app")
+def serve_frontend():
+    return FileResponse("../frontend/dist/index.html")
