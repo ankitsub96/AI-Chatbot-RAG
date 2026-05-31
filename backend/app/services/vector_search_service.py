@@ -1,23 +1,27 @@
-import json
-import faiss
-import numpy as np
-import pickle
-from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
+from sqlalchemy import func
+from sqlmodel import Session, select
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from app.config.settings import EMBED_MODEL
-from app.utils.helpers import timer
+
+from app.services.database import engine
+from app.models.document_chunk import DocumentChunk
 
 embedding_model = SentenceTransformer(EMBED_MODEL)
 
 
+# =====================================================
+# EMBEDDINGS
+# =====================================================
+
+
 def create_embedding(text: str):
-
-    embedding = embedding_model.encode([text])
-
-    embedding = np.array(embedding).astype("float32")
-
-    faiss.normalize_L2(embedding)
+    embedding = embedding_model.encode(
+        [text],
+        normalize_embeddings=True,
+    )
 
     return embedding
 
@@ -31,216 +35,453 @@ def create_embeddings(
         texts,
         batch_size=batch_size,
         show_progress_bar=show_progress_bar,
+        normalize_embeddings=True,
     )
-
-    embeddings = np.array(embeddings).astype("float32")
-    faiss.normalize_L2(embeddings)
 
     return embeddings
 
 
-def load_index_and_metadata(index_path: str, metadata_path: str):
-
-    index = load_faiss_index(index_path)
-
-    with open(metadata_path, "r", encoding="utf-8") as f:
-
-        metadata = json.load(f)
-
-    return index, metadata
+# =====================================================
+# VECTOR SEARCH (PGVECTOR)
+# =====================================================
 
 
-def semantic_search(
+def vector_search(
     *,
-    index,
-    metadata,
+    session: Session,
     query_embedding,
-    top_k: int,
+    filename: str | None = None,
+    top_k: int = 20,
 ):
+    print("vector_search::")
+    stmt = select(DocumentChunk)
 
-    distances, indices = index.search(query_embedding, top_k)
+    if filename:
+        stmt = stmt.where(
+            DocumentChunk.filename == filename,
+        )
+
+    stmt = stmt.order_by(
+        DocumentChunk.embedding.op("<=>")(query_embedding[0].tolist())
+    ).limit(top_k)
+
+    rows = session.exec(stmt).all()
 
     results = []
 
-    for distance, idx in zip(distances[0], indices[0]):
-
-        if idx >= len(metadata):
-
-            continue
-
-        results.append({"score": float(distance), "data": metadata[idx]})
+    for rank, row in enumerate(rows):
+        results.append(
+            {
+                "id": row.id,
+                "filename": row.filename,
+                "page": row.page,
+                "section": row.section,
+                "chunk_type": row.chunk_type,
+                "text": row.text,
+                "chunk_metadata": row.chunk_metadata,
+                "score": rank + 1,
+            }
+        )
 
     return results
 
 
-@timer
-def create_hnsw_index(
-    embeddings,
-    hnsw_m: int = 32,
-    ef_construction: int = 200,
+# =====================================================
+# KEYWORD SEARCH (POSTGRES FTS)
+# =====================================================
+
+
+def keyword_search(
+    *,
+    session: Session,
+    query: str,
+    filename: str | None = None,
+    top_k: int = 20,
 ):
-
-    dimension = embeddings.shape[1]
-
-    index = faiss.IndexHNSWFlat(
-        dimension,
-        hnsw_m,
+    ts_query = func.plainto_tsquery(
+        "simple",
+        query,
     )
 
-    index.hnsw.efConstruction = ef_construction
+    stmt = select(
+        DocumentChunk,
+        func.ts_rank(
+            DocumentChunk.tsv,
+            ts_query,
+        ).label("score"),
+    ).where(DocumentChunk.tsv.op("@@")(ts_query))
 
-    index.metric_type = faiss.METRIC_INNER_PRODUCT
+    if filename:
+        stmt = stmt.where(
+            DocumentChunk.filename == filename,
+        )
 
-    index.add(embeddings)
+    stmt = stmt.order_by(
+        func.ts_rank(
+            DocumentChunk.tsv,
+            ts_query,
+        ).desc()
+    ).limit(top_k)
 
-    return index
+    rows = session.exec(stmt).all()
 
+    results = []
 
-def create_flat_index(embeddings):
+    for chunk, score in rows:
+        results.append(
+            {
+                "id": chunk.id,
+                "filename": chunk.filename,
+                "page": chunk.page,
+                "section": chunk.section,
+                "chunk_type": chunk.chunk_type,
+                "text": chunk.text,
+                "chunk_metadata": chunk.chunk_metadata,
+                "score": float(score),
+            }
+        )
 
-    dimension = embeddings.shape[1]
-
-    index = faiss.IndexFlatIP(dimension)
-
-    index.add(embeddings)
-
-    return index
-
-
-@timer
-def save_faiss_index(index, path: str):
-
-    faiss.write_index(index, path)
-
-
-def load_faiss_index(path: str):
-
-    return faiss.read_index(path)
-
-
-# =========================
-# BM25 INDEX
-# =========================
-
-
-def build_bm25_index(documents: list[dict]) -> BM25Okapi:
-    """
-    Build BM25 index from document chunks.
-    Tokenizes each chunk's text by whitespace.
-    """
-    corpus = [doc["text"].lower().split() for doc in documents]
-    return BM25Okapi(corpus)
+    return results
 
 
-def save_bm25_index(index: BM25Okapi, path: str):
-    with open(path, "wb") as f:
-        pickle.dump(index, f)
-
-
-def load_bm25_index(path: str) -> BM25Okapi:
-    with open(path, "rb") as f:
-        return pickle.load(f)
-
-
-# =========================
-# HYBRID SEARCH
-# =========================
+# =====================================================
+# HYBRID SEARCH (RRF)
+# =====================================================
 
 
 def hybrid_search(
     *,
-    faiss_index,
-    bm25_index: BM25Okapi,
-    metadata: list[dict],
-    query_embedding,
+    session: Session,
     query: str,
-    top_k: int,
-    faiss_weight: float = 0.6,
-    bm25_weight: float = 0.4,
-) -> list[dict]:
-    """
-    Combines FAISS dense search and BM25 keyword search
-    using Reciprocal Rank Fusion (RRF).
+    query_embedding,
+    filename: str | None = None,
+    top_k: int = 10,
+    vector_weight: float = 0.6,
+    keyword_weight: float = 0.4,
+):
+    print("hybrid_search::")
+    vector_results = vector_search(
+        session=session,
+        query_embedding=query_embedding,
+        filename=filename,
+        top_k=top_k * 3,
+    )
 
-    faiss_weight + bm25_weight should equal 1.0.
-    Tune faiss_weight higher for semantic queries,
-    bm25_weight higher for keyword/name-heavy queries.
-    """
+    keyword_results = keyword_search(
+        session=session,
+        query=query,
+        filename=filename,
+        top_k=top_k * 3,
+    )
 
-    n = len(metadata)
-    retrieve_k = min(top_k * 3, n)  # retrieve more, rerank down to top_k
+    vector_ranks = {row["id"]: rank + 1 for rank, row in enumerate(vector_results)}
 
-    # =========================
-    # FAISS DENSE SEARCH
-    # =========================
+    keyword_ranks = {row["id"]: rank + 1 for rank, row in enumerate(keyword_results)}
 
-    distances, indices = faiss_index.search(query_embedding, retrieve_k)
+    all_ids = set(vector_ranks.keys()) | set(keyword_ranks.keys())
 
-    faiss_ranks = {}
-
-    for rank, (idx, score) in enumerate(zip(indices[0], distances[0])):
-        if idx < n:
-            faiss_ranks[idx] = {
-                "rank": rank + 1,
-                "score": float(score),
-            }
-
-    # =========================
-    # BM25 KEYWORD SEARCH
-    # =========================
-
-    tokenized_query = query.lower().split()
-    bm25_scores = bm25_index.get_scores(tokenized_query)
-    bm25_ranked = sorted(
-        range(n),
-        key=lambda i: bm25_scores[i],
-        reverse=True,
-    )[:retrieve_k]
-
-    bm25_ranks = {
-        idx: {"rank": rank + 1, "score": float(bm25_scores[idx])}
-        for rank, idx in enumerate(bm25_ranked)
-    }
-
-    # =========================
-    # RECIPROCAL RANK FUSION
-    # =========================
-
-    rrf_k = 60  # standard RRF constant
-
-    all_indices = set(faiss_ranks.keys()) | set(bm25_ranks.keys())
+    rrf_k = 60
 
     fused_scores = {}
 
-    for idx in all_indices:
-        faiss_rrf = (
-            faiss_weight * (1 / (rrf_k + faiss_ranks[idx]["rank"]))
-            if idx in faiss_ranks
+    for doc_id in all_ids:
+
+        vector_score = (
+            vector_weight * (1 / (rrf_k + vector_ranks[doc_id]))
+            if doc_id in vector_ranks
             else 0
         )
-        bm25_rrf = (
-            bm25_weight * (1 / (rrf_k + bm25_ranks[idx]["rank"]))
-            if idx in bm25_ranks
+
+        keyword_score = (
+            keyword_weight * (1 / (rrf_k + keyword_ranks[doc_id]))
+            if doc_id in keyword_ranks
             else 0
         )
-        fused_scores[idx] = faiss_rrf + bm25_rrf
 
-    # =========================
-    # SORT AND RETURN TOP K
-    # =========================
+        fused_scores[doc_id] = vector_score + keyword_score
 
-    top_indices = sorted(
-        fused_scores,
-        key=lambda i: fused_scores[i],
-        reverse=True,
-    )[:top_k]
+    merged = {}
+
+    for row in vector_results:
+        merged[row["id"]] = row
+
+    for row in keyword_results:
+        merged[row["id"]] = row
 
     return [
         {
-            "score": fused_scores[idx],
-            "faiss_score": faiss_ranks.get(idx, {}).get("score", 0),
-            "bm25_score": bm25_ranks.get(idx, {}).get("score", 0),
-            "data": metadata[idx],
+            **merged[doc_id],
+            "hybrid_score": fused_scores[doc_id],
         }
-        for idx in top_indices
+        for doc_id in sorted(
+            fused_scores,
+            key=fused_scores.get,
+            reverse=True,
+        )[:top_k]
     ]
+
+
+def semantic_document_search(
+    filename: str,
+    query_embedding,
+    top_k: int,
+):
+    print("ENTER semantic_document_search")
+    print(type(query_embedding))
+    print(query_embedding.shape)
+
+    print(type(query_embedding[0]))
+    print(query_embedding[0].shape)
+
+    print(type(query_embedding[0].tolist()))
+    print(len(query_embedding[0].tolist()))
+
+    # vector = [float(x) for x in query_embedding[0]]
+
+    with Session(engine) as session:
+
+        rows = session.exec(
+            select(DocumentChunk)
+            .where(DocumentChunk.filename == filename)
+            .order_by(
+                DocumentChunk.embedding.cosine_distance(query_embedding[0].tolist())
+                # DocumentChunk.embedding.cosine_distance(vector)
+            )
+            .limit(top_k)
+        ).all()
+
+        results = []
+
+        for rank, row in enumerate(rows, start=1):
+
+            score = 1 / rank
+
+            results.append(
+                {
+                    "id": row.id,
+                    "score": score,
+                    "semantic_score": score,
+                    "keyword_score": 0,
+                    "data": row.model_dump(),
+                }
+            )
+
+        return results
+
+
+def keyword_document_search(
+    filename: str,
+    query: str,
+    top_k: int,
+):
+    print("ENTER keyword_document_search")
+    with Session(engine) as session:
+
+        tsquery = func.plainto_tsquery(
+            "simple",
+            query,
+        )
+
+        rank_expr = func.ts_rank(
+            DocumentChunk.tsv,
+            tsquery,
+        )
+
+        rows = session.exec(
+            select(
+                DocumentChunk,
+                rank_expr.label("rank_score"),
+            )
+            .where(DocumentChunk.filename == filename)
+            .where(DocumentChunk.tsv.op("@@")(tsquery))
+            .order_by(rank_expr.desc())
+            .limit(top_k)
+        ).all()
+
+        results = []
+
+        for row, rank_score in rows:
+
+            results.append(
+                {
+                    "id": row.id,
+                    "score": float(rank_score),
+                    "semantic_score": 0,
+                    "keyword_score": float(rank_score),
+                    "data": row.model_dump(),
+                }
+            )
+
+        return results
+
+
+def keyword_document_search(
+    filename: str,
+    query: str,
+    top_k: int,
+):
+    with Session(engine) as session:
+
+        tsquery = func.plainto_tsquery(
+            "simple",
+            query,
+        )
+
+        rank_expr = func.ts_rank(
+            DocumentChunk.tsv,
+            tsquery,
+        )
+
+        rows = session.exec(
+            select(
+                DocumentChunk,
+                rank_expr.label("rank_score"),
+            )
+            .where(DocumentChunk.filename == filename)
+            .where(DocumentChunk.tsv.op("@@")(tsquery))
+            .order_by(rank_expr.desc())
+            .limit(top_k)
+        ).all()
+
+        results = []
+
+        for row, rank_score in rows:
+
+            results.append(
+                {
+                    "id": row.id,
+                    "score": float(rank_score),
+                    "semantic_score": 0,
+                    "keyword_score": float(rank_score),
+                    "data": row.model_dump(),
+                }
+            )
+
+        return results
+
+
+def hybrid_document_search(
+    filename: str,
+    query: str,
+    query_embedding,
+    top_k: int,
+):
+    print("ENTER hybrid_document_search")
+    semantic_results = semantic_document_search(
+        filename=filename,
+        query_embedding=query_embedding,
+        top_k=top_k * 3,
+    )
+
+    keyword_results = keyword_document_search(
+        filename=filename,
+        query=query,
+        top_k=top_k * 3,
+    )
+
+    semantic_ranks = {}
+
+    for rank, item in enumerate(
+        semantic_results,
+        start=1,
+    ):
+        semantic_ranks[item["id"]] = rank
+
+    keyword_ranks = {}
+
+    for rank, item in enumerate(
+        keyword_results,
+        start=1,
+    ):
+        keyword_ranks[item["id"]] = rank
+
+    all_ids = set(semantic_ranks.keys()) | set(keyword_ranks.keys())
+
+    rrf_k = 60
+
+    merged = {}
+
+    semantic_map = {item["id"]: item for item in semantic_results}
+
+    keyword_map = {item["id"]: item for item in keyword_results}
+
+    for chunk_id in all_ids:
+
+        semantic_rrf = 0
+        keyword_rrf = 0
+
+        if chunk_id in semantic_ranks:
+
+            semantic_rrf = 0.6 * (1 / (rrf_k + semantic_ranks[chunk_id]))
+
+        if chunk_id in keyword_ranks:
+
+            keyword_rrf = 0.4 * (1 / (rrf_k + keyword_ranks[chunk_id]))
+
+        total_score = semantic_rrf + keyword_rrf
+
+        base_result = semantic_map.get(chunk_id) or keyword_map.get(chunk_id)
+
+        merged[chunk_id] = {
+            "score": total_score,
+            "semantic_score": semantic_rrf,
+            "keyword_score": keyword_rrf,
+            "data": base_result["data"],
+        }
+
+    results = sorted(
+        merged.values(),
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return results[:top_k]
+
+
+def hybrid_document_search_multiple(
+    filenames: list[str],
+    query: str,
+    query_embedding,
+    top_k: int,
+):
+    def search_file(filename):
+
+        results = hybrid_document_search(
+            filename=filename,
+            query=query,
+            query_embedding=query_embedding,
+            top_k=top_k,
+        )
+
+        for result in results:
+
+            result["data"]["source_file"] = filename
+
+        return results
+
+    worker_count = min(
+        len(filenames),
+        8,
+    )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+
+        all_results = list(
+            executor.map(
+                search_file,
+                filenames,
+            )
+        )
+
+    merged = []
+
+    for result_set in all_results:
+
+        merged.extend(result_set)
+
+    merged.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return merged[:top_k]

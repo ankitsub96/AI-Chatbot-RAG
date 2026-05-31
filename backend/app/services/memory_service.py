@@ -1,18 +1,25 @@
 import os
 import json
 import asyncio
+from sqlmodel import Session, select
+from sqlalchemy import text
 
 from app.services.llm_service import generate_response
 from app.services.vector_search_service import (
     create_embedding,
     create_embeddings,
-    load_index_and_metadata,
-    semantic_search,
-    save_faiss_index,
-    create_flat_index,
-    load_faiss_index,
+    # load_index_and_metadata,
+    # semantic_search,
+    # save_faiss_index,
+    # create_flat_index,
+    # load_faiss_index,
 )
 
+from app.services.database import engine
+from app.models.conversation_memory import ConversationMemory
+from app.models.conversation_summary import (
+    ConversationSummary,
+)
 
 from app.utils.file_utils import save_json_file, load_json_file, write_text_file
 
@@ -23,7 +30,7 @@ from app.utils.file_utils import save_json_file, load_json_file, write_text_file
 MEMORY_DIR = "app/memory_store"
 
 MEMORY_TOP_K = 5
-
+SUMMARY_TOP_K = 5
 MAX_HISTORY = 50
 
 SUMMARY_TRIGGER = 12
@@ -130,17 +137,14 @@ Conversation:
 # =========================
 
 
-async def save_conversation_turn(session_id: str, question: str, answer: str):
-
+async def save_conversation_turn(
+    session_id: str,
+    question: str,
+    answer: str,
+):
     print("\n" + "=" * 80)
     print("SAVING CONVERSATION MEMORY")
     print("=" * 80)
-
-    index_path = get_memory_index_path(session_id)
-
-    metadata_path = get_memory_metadata_path(session_id)
-
-    txt_path = os.path.join(MEMORY_DIR, f"{session_id}.txt")
 
     memory_text = f"""
 USER:
@@ -151,12 +155,39 @@ ASSISTANT:
 """
 
     # =========================
-    # LOAD MEMORY
+    # SAVE CURRENT MEMORY
     # =========================
 
-    memories = load_json_file(metadata_path, default=[])
+    embedding = await asyncio.to_thread(
+        create_embedding,
+        memory_text,
+    )
 
-    memories.append({"question": question, "answer": answer, "text": memory_text})
+    with Session(engine) as session:
+
+        session.add(
+            ConversationMemory(
+                session_id=session_id,
+                question=question,
+                answer=answer,
+                text=memory_text,
+                embedding=embedding[0].tolist(),
+            )
+        )
+
+        session.commit()
+
+    # =========================
+    # LOAD SESSION MEMORIES
+    # =========================
+
+    with Session(engine) as session:
+
+        memories = session.exec(
+            select(ConversationMemory)
+            .where(ConversationMemory.session_id == session_id)
+            .order_by(ConversationMemory.created_at)
+        ).all()
 
     # =========================
     # SUMMARIZATION
@@ -166,60 +197,56 @@ ASSISTANT:
 
         old_memories = memories[:-RECENT_HISTORY]
 
-        previous_summary = await asyncio.to_thread(load_summary, session_id)
+        summary_input = []
 
-        new_summary = await asyncio.to_thread(summarize_conversation, old_memories)
+        for memory in old_memories:
 
-        combined_summary = f"""
-PREVIOUS SUMMARY:
-{previous_summary}
+            summary_input.append(
+                {
+                    "question": memory.question,
+                    "answer": memory.answer,
+                }
+            )
 
-NEW SUMMARY:
-{new_summary}
-"""
-
-        final_summary = await asyncio.to_thread(
+        new_summary = await asyncio.to_thread(
             summarize_conversation,
-            [{"question": "Conversation Summary", "answer": combined_summary}],
+            summary_input,
         )
 
-        await asyncio.to_thread(save_summary, session_id, final_summary)
+        summary_embedding = await asyncio.to_thread(
+            create_embedding,
+            new_summary,
+        )
 
-        memories = memories[-RECENT_HISTORY:]
+        with Session(engine) as session:
 
-    # =========================
-    # HARD LIMIT
-    # =========================
+            session.add(
+                ConversationSummary(
+                    session_id=session_id,
+                    summary=new_summary,
+                    embedding=summary_embedding[0].tolist(),
+                )
+            )
 
-    memories = memories[-MAX_HISTORY:]
+            session.commit()
 
-    texts = [memory["text"] for memory in memories]
+        # =========================
+        # DELETE SUMMARIZED MEMORIES
+        # KEEP RECENT ONLY
+        # =========================
 
-    # =========================
-    # PARALLEL TASKS
-    # =========================
+        old_ids = [memory.id for memory in old_memories]
 
-    embeddings_task = asyncio.to_thread(create_embeddings, texts)
+        with Session(engine) as session:
 
-    txt_content_task = asyncio.to_thread(build_memory_text_file, session_id, memories)
+            rows = session.exec(
+                select(ConversationMemory).where(ConversationMemory.id.in_(old_ids))
+            ).all()
 
-    embeddings, txt_content = await asyncio.gather(embeddings_task, txt_content_task)
+            for row in rows:
+                session.delete(row)
 
-    # =========================
-    # BUILD INDEX
-    # =========================
-
-    index = create_flat_index(embeddings)
-
-    # =========================
-    # SAVE ALL IN PARALLEL
-    # =========================
-
-    await asyncio.gather(
-        asyncio.to_thread(save_faiss_index, index, index_path),
-        asyncio.to_thread(save_json_file, metadata_path, memories),
-        asyncio.to_thread(write_text_file, txt_path, txt_content),
-    )
+            session.commit()
 
     print("\nMEMORY SAVE COMPLETE")
 
@@ -272,40 +299,94 @@ ASSISTANT:
 # =========================
 
 
-def retrieve_relevant_memories(session_id: str, question: str):
-
-    index_path = get_memory_index_path(session_id)
-
-    metadata_path = get_memory_metadata_path(session_id)
-
-    if not os.path.exists(index_path) or not os.path.exists(metadata_path):
-
-        return ""
-
-    index, memories = load_index_and_metadata(index_path, metadata_path)
+def retrieve_relevant_memories(
+    session_id: str,
+    question: str,
+):
+    print("\nMEMORY RETRIEVAL")
 
     query_embedding = create_embedding(question)
 
-    results = semantic_search(
-        index=index,
-        metadata=memories,
-        query_embedding=query_embedding,
-        top_k=MEMORY_TOP_K,
-    )
+    embedding_str = str(query_embedding[0].tolist())
 
     context = ""
 
-    print("\nMEMORY RETRIEVAL")
+    with Session(engine) as session:
 
-    for result in results:
+        # =========================
+        # LONG TERM SUMMARIES
+        # =========================
 
-        memory = result["data"]
+        summary_rows = session.execute(
+            text("""
+                SELECT
+                    summary,
+                    embedding <=> CAST(:embedding AS vector) AS distance
+                FROM conversation_summaries
+                WHERE session_id = :session_id
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT :limit
+                """),
+            {
+                "session_id": session_id,
+                "embedding": embedding_str,
+                "limit": SUMMARY_TOP_K,
+            },
+        ).mappings()
 
-        print({"score": result["score"], "memory": memory["text"]})
+        for row in summary_rows:
 
-        context += f"""
+            print(
+                {
+                    "type": "summary",
+                    "distance": row["distance"],
+                }
+            )
 
-{memory['text']}
+            context += f"""
+
+LONG TERM MEMORY
+
+{row["summary"]}
+
+"""
+
+        # =========================
+        # RECENT MEMORIES
+        # =========================
+
+        memory_rows = session.execute(
+            text("""
+                SELECT
+                    text,
+                    embedding <=> CAST(:embedding AS vector) AS distance
+                FROM conversation_memories
+                WHERE session_id = :session_id
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT :limit
+                """),
+            {
+                "session_id": session_id,
+                "embedding": embedding_str,
+                "limit": MEMORY_TOP_K,
+            },
+        ).mappings()
+
+        for row in memory_rows:
+
+            print(
+                {
+                    "type": "memory",
+                    "distance": row["distance"],
+                }
+            )
+
+            context += f"""
+
+RECENT MEMORY
+
+{row["text"]}
+
 """
 
     return context
@@ -318,77 +399,109 @@ def retrieve_relevant_memories(session_id: str, question: str):
 
 def get_all_sessions():
 
-    sessions = []
+    with Session(engine) as session:
 
-    for file in os.listdir(MEMORY_DIR):
+        memory_sessions = session.exec(select(ConversationMemory.session_id)).all()
 
-        if file.endswith(".json") and "_summary" not in file:
+        summary_sessions = session.exec(select(ConversationSummary.session_id)).all()
 
-            sessions.append(file.replace(".json", ""))
-
-    return sessions
+    return sorted(set(memory_sessions) | set(summary_sessions))
 
 
-def get_session_history(session_id: str, page: int = 1, page_size: int = 20):
+def get_session_history(
+    session_id: str,
+    page: int = 1,
+    page_size: int = 20,
+):
+    with Session(engine) as session:
 
-    path = get_memory_metadata_path(session_id)
+        rows = session.exec(
+            select(ConversationMemory)
+            .where(ConversationMemory.session_id == session_id)
+            .order_by(ConversationMemory.created_at.desc())
+        ).all()
 
-    if not os.path.exists(path):
-
-        return {"total": 0, "items": []}
-
-    with open(path, "r", encoding="utf-8") as f:
-
-        history = json.load(f)
-
-    total = len(history)
+    total = len(rows)
 
     start = (page - 1) * page_size
-
     end = start + page_size
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": history[start:end],
+        "items": rows[start:end],
     }
 
 
-def delete_session_memory(session_id: str):
+def delete_session_memory(
+    session_id: str,
+):
+    with Session(engine) as session:
 
-    files = [
-        get_memory_index_path(session_id),
-        get_memory_metadata_path(session_id),
-        get_summary_path(session_id),
-    ]
+        memories = session.exec(
+            select(ConversationMemory).where(
+                ConversationMemory.session_id == session_id
+            )
+        ).all()
 
-    for path in files:
+        for row in memories:
+            session.delete(row)
 
-        if os.path.exists(path):
+        summaries = session.exec(
+            select(ConversationSummary).where(
+                ConversationSummary.session_id == session_id
+            )
+        ).all()
 
-            os.remove(path)
+        for row in summaries:
+            session.delete(row)
+
+        session.commit()
 
 
-def semantic_search_session(session_id: str, query: str, top_k: int = 5):
-
-    index_path = get_memory_index_path(session_id)
-
-    metadata_path = get_memory_metadata_path(session_id)
-
-    if not os.path.exists(index_path):
-
-        return []
-
-    index, history = load_index_and_metadata(index_path, metadata_path)
-
+def semantic_search_session(
+    session_id: str,
+    query: str,
+    top_k: int = 5,
+):
     query_embedding = create_embedding(query)
 
-    results = semantic_search(
-        index=index,
-        metadata=history,
-        query_embedding=query_embedding,
-        top_k=top_k,
-    )
+    embedding_str = str(query_embedding[0].tolist())
 
-    return [result["data"] for result in results]
+    with Session(engine) as session:
+
+        rows = session.execute(
+            text("""
+                SELECT
+                    id,
+                    session_id,
+                    question,
+                    answer,
+                    text,
+                    created_at,
+                    embedding <=> CAST(:embedding AS vector) AS distance
+                FROM conversation_memories
+                WHERE session_id = :session_id
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT :top_k
+                """),
+            {
+                "session_id": session_id,
+                "embedding": embedding_str,
+                "top_k": top_k,
+            },
+        ).mappings()
+
+        return [
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "question": row["question"],
+                "answer": row["answer"],
+                "text": row["text"],
+                "created_at": row["created_at"],
+                "distance": row["distance"],
+            }
+            for row in rows
+        ]

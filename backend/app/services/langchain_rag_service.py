@@ -13,7 +13,10 @@ from typing import List, Optional
 from langchain_groq import ChatGroq
 from concurrent.futures import ThreadPoolExecutor
 
+from sqlmodel import Session, select
+from sqlalchemy import text
 
+from app.services.database import engine
 from app.services.memory_service import (
     retrieve_relevant_memories,
     save_conversation_turn,
@@ -26,17 +29,15 @@ from app.services.semantic_cache_service import (
 )
 from app.services.vector_search_service import (
     create_embedding,
-    load_index_and_metadata,
-    semantic_search,
+    # load_index_and_metadata,
+    # semantic_search,
+    # build_bm25_index,
+    # save_bm25_index,
+    # load_bm25_index,
+    hybrid_search,
 )
 from app.utils.file_utils import get_index_path, get_metadata_path, get_bm25_path
 from app.config.settings import TOP_K
-from app.services.vector_search_service import (
-    build_bm25_index,
-    save_bm25_index,
-    load_bm25_index,
-    hybrid_search,
-)
 
 # ── shared instances ─────────────────────────────────────────────────────────
 
@@ -54,55 +55,171 @@ llmGroq = ChatGroq(
 # ── retriever ────────────────────────────────────────────────────────────────
 
 
-class FaissRetriever(BaseRetriever):
+# class FaissRetriever(BaseRetriever):
 
-    indexes: list
-    document_sets: list[list]
+#     indexes: list
+#     document_sets: list[list]
+
+#     query_embedding: object
+#     query: str = ""
+
+#     bm25_indexes: Optional[list] = None
+
+#     def _search_single_document(
+#         self,
+#         doc_idx: int,
+#     ):
+
+#         index = self.indexes[doc_idx]
+
+#         documents = self.document_sets[doc_idx]
+
+#         bm25_index = None
+
+#         if self.bm25_indexes and len(self.bm25_indexes) > doc_idx:
+#             bm25_index = self.bm25_indexes[doc_idx]
+
+#         print(
+#             {
+#                 "document_set": doc_idx,
+#                 "chunks": len(documents),
+#                 "bm25_enabled": bm25_index is not None,
+#             }
+#         )
+
+#         if bm25_index is not None:
+
+#             return hybrid_search(
+#                 faiss_index=index,
+#                 bm25_index=bm25_index,
+#                 metadata=documents,
+#                 query_embedding=self.query_embedding,
+#                 query=self.query,
+#                 top_k=TOP_K,
+#             )
+
+#         return semantic_search(
+#             index=index,
+#             metadata=documents,
+#             query_embedding=self.query_embedding,
+#             top_k=TOP_K,
+#         )
+
+#     def _get_relevant_documents(
+#         self,
+#         query: str,
+#         *,
+#         run_manager: CallbackManagerForRetrieverRun,
+#     ) -> List[Document]:
+
+#         print("\n" + "=" * 80)
+#         print("LANGCHAIN RETRIEVER")
+#         print("=" * 80)
+
+#         # =========================
+#         # PARALLEL SEARCH
+#         # =========================
+
+#         worker_count = min(
+#             len(self.indexes),
+#             8,
+#         )
+
+#         with ThreadPoolExecutor(max_workers=worker_count) as executor:
+
+#             search_results = list(
+#                 executor.map(
+#                     self._search_single_document,
+#                     range(len(self.indexes)),
+#                 )
+#             )
+
+#         # =========================
+#         # MERGE
+#         # =========================
+
+#         all_results = []
+
+#         for result_set in search_results:
+#             all_results.extend(result_set)
+
+#         print(
+#             {
+#                 "documents_searched": len(self.indexes),
+#                 "total_candidates": len(all_results),
+#             }
+#         )
+
+#         # =========================
+#         # GLOBAL RERANK
+#         # =========================
+
+#         all_results.sort(
+#             key=lambda x: x["score"],
+#             reverse=True,
+#         )
+
+#         all_results = all_results[:TOP_K]
+
+#         print(
+#             {
+#                 "final_results": len(all_results),
+#             }
+#         )
+
+#         # =========================
+#         # DEBUG
+#         # =========================
+
+#         for rank, result in enumerate(all_results, start=1):
+
+#             print(
+#                 {
+#                     "rank": rank,
+#                     "score": result["score"],
+#                     "page": result["data"].get("page"),
+#                     "source_file": result["data"].get("source_file"),
+#                 }
+#             )
+
+#         # =========================
+#         # LANGCHAIN DOCUMENTS
+#         # =========================
+
+#         return [
+#             Document(
+#                 page_content=result["data"]["text"],
+#                 metadata={
+#                     "page": result["data"].get("page"),
+#                     "source_file": result["data"].get("source_file"),
+#                     "score": result["score"],
+#                 },
+#             )
+#             for result in all_results
+#         ]
+
+
+class PostgresRetriever(BaseRetriever):
+
+    filenames: list[str]
 
     query_embedding: object
-    query: str = ""
 
-    bm25_indexes: Optional[list] = None
+    query: str = ""
 
     def _search_single_document(
         self,
-        doc_idx: int,
+        filename: str,
     ):
-
-        index = self.indexes[doc_idx]
-
-        documents = self.document_sets[doc_idx]
-
-        bm25_index = None
-
-        if self.bm25_indexes and len(self.bm25_indexes) > doc_idx:
-            bm25_index = self.bm25_indexes[doc_idx]
-
-        print(
-            {
-                "document_set": doc_idx,
-                "chunks": len(documents),
-                "bm25_enabled": bm25_index is not None,
-            }
-        )
-
-        if bm25_index is not None:
+        with Session(engine) as session:
 
             return hybrid_search(
-                faiss_index=index,
-                bm25_index=bm25_index,
-                metadata=documents,
-                query_embedding=self.query_embedding,
+                session=session,
                 query=self.query,
+                query_embedding=self.query_embedding,
+                filename=filename,
                 top_k=TOP_K,
             )
-
-        return semantic_search(
-            index=index,
-            metadata=documents,
-            query_embedding=self.query_embedding,
-            top_k=TOP_K,
-        )
 
     def _get_relevant_documents(
         self,
@@ -110,32 +227,26 @@ class FaissRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
-
+        print("INSIDE RETRIEVER")
         print("\n" + "=" * 80)
-        print("LANGCHAIN RETRIEVER")
+        print("POSTGRES RETRIEVER")
         print("=" * 80)
 
-        # =========================
-        # PARALLEL SEARCH
-        # =========================
-
         worker_count = min(
-            len(self.indexes),
+            len(self.filenames),
             8,
         )
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+        ) as executor:
 
             search_results = list(
                 executor.map(
                     self._search_single_document,
-                    range(len(self.indexes)),
+                    self.filenames,
                 )
             )
-
-        # =========================
-        # MERGE
-        # =========================
 
         all_results = []
 
@@ -144,17 +255,13 @@ class FaissRetriever(BaseRetriever):
 
         print(
             {
-                "documents_searched": len(self.indexes),
+                "documents_searched": len(self.filenames),
                 "total_candidates": len(all_results),
             }
         )
 
-        # =========================
-        # GLOBAL RERANK
-        # =========================
-
         all_results.sort(
-            key=lambda x: x["score"],
+            key=lambda x: x["hybrid_score"],
             reverse=True,
         )
 
@@ -166,32 +273,26 @@ class FaissRetriever(BaseRetriever):
             }
         )
 
-        # =========================
-        # DEBUG
-        # =========================
-
-        for rank, result in enumerate(all_results, start=1):
-
+        for rank, result in enumerate(
+            all_results,
+            start=1,
+        ):
             print(
                 {
                     "rank": rank,
-                    "score": result["score"],
-                    "page": result["data"].get("page"),
-                    "source_file": result["data"].get("source_file"),
+                    "score": result["hybrid_score"],
+                    "page": result.get("page"),
+                    "source_file": result.get("filename"),
                 }
             )
 
-        # =========================
-        # LANGCHAIN DOCUMENTS
-        # =========================
-
         return [
             Document(
-                page_content=result["data"]["text"],
+                page_content=result["text"],
                 metadata={
-                    "page": result["data"].get("page"),
-                    "source_file": result["data"].get("source_file"),
-                    "score": result["score"],
+                    "page": result.get("page"),
+                    "source_file": result.get("filename"),
+                    "score": result["hybrid_score"],
                 },
             )
             for result in all_results
@@ -231,7 +332,10 @@ async def ask_document_langchain(
     # EXACT CACHE
     # =========================
 
-    exact_cached = get_exact_cache(cache_key, question)
+    exact_cached = get_exact_cache(
+        cache_key,
+        question,
+    )
 
     if exact_cached:
 
@@ -240,8 +344,22 @@ async def ask_document_langchain(
         if stream:
 
             async def _exact_stream():
-                yield format_sse(json.dumps({"token": exact_cached}))
-                yield format_sse(json.dumps({"done": True}), event="done")
+                yield format_sse(
+                    json.dumps(
+                        {
+                            "token": exact_cached,
+                        }
+                    )
+                )
+
+                yield format_sse(
+                    json.dumps(
+                        {
+                            "done": True,
+                        }
+                    ),
+                    event="done",
+                )
 
             return _exact_stream()
 
@@ -274,127 +392,47 @@ async def ask_document_langchain(
         if stream:
 
             async def _semantic_stream():
-                yield format_sse(json.dumps({"token": semantic_cached}))
-                yield format_sse(json.dumps({"done": True}), event="done")
+                yield format_sse(
+                    json.dumps(
+                        {
+                            "token": semantic_cached,
+                        }
+                    )
+                )
+
+                yield format_sse(
+                    json.dumps(
+                        {
+                            "done": True,
+                        }
+                    ),
+                    event="done",
+                )
 
             return _semantic_stream()
 
         return semantic_cached
 
     # =========================
-    # FILE VALIDATION
+    # MEMORY
     # =========================
 
-    for filename in filenames:
+    print("\nLoading memory context...")
 
-        index_path = get_index_path(filename)
-
-        metadata_path = get_metadata_path(filename)
-
-        if not os.path.exists(index_path):
-
-            raise HTTPException(
-                status_code=404,
-                detail=f"Document '{filename}' is still processing",
-            )
-
-        if not os.path.exists(metadata_path):
-
-            raise HTTPException(
-                status_code=404,
-                detail=f"Metadata for '{filename}' is still processing",
-            )
-
-    # =========================
-    # PARALLEL LOAD
-    # =========================
-
-    print("\nLoading retrieval systems in parallel...")
-
-    document_tasks = []
-
-    bm25_tasks = []
-
-    for filename in filenames:
-
-        index_path = get_index_path(filename)
-
-        metadata_path = get_metadata_path(filename)
-
-        bm25_path = get_bm25_path(filename)
-
-        document_tasks.append(
-            asyncio.to_thread(
-                load_index_and_metadata,
-                index_path,
-                metadata_path,
-            )
-        )
-
-        bm25_tasks.append(
-            (
-                asyncio.to_thread(load_bm25_index, bm25_path)
-                if os.path.exists(bm25_path)
-                else asyncio.sleep(0, result=None)
-            )
-        )
-
-    memory_task = asyncio.to_thread(
+    memory_context = await asyncio.to_thread(
         retrieve_relevant_memories,
         session_id,
         question,
     )
 
-    all_document_results, all_bm25_indexes, memory_context = await asyncio.gather(
-        asyncio.gather(*document_tasks),
-        asyncio.gather(*bm25_tasks),
-        memory_task,
-    )
-
-    # =========================
-    # MERGE DOCUMENTS
-    # =========================
-
-    merged_indexes = []
-    document_sets = []
-
-    for filename, ((index, docs), bm25_index) in zip(
-        filenames,
-        zip(all_document_results, all_bm25_indexes),
-    ):
-
-        for doc in docs:
-
-            doc["source_file"] = filename
-
-        merged_indexes.append(index)
-
-        document_sets.append(docs)
-
-    print(
-        {
-            "documents_loaded": len(document_sets),
-            "files_loaded": len(filenames),
-        }
-    )
-
     # =========================
     # RETRIEVER
     # =========================
-    print(type(document_sets))
-    print(type(document_sets[0]))
-    print(type(document_sets[0][0]))
-    retriever = FaissRetriever(
-        # indexes=merged_indexes,
-        # documents=merged_documents,
-        # query_embedding=query_embedding,
-        # query=question,
-        # bm25_indexes=all_bm25_indexes,
-        indexes=merged_indexes,
-        document_sets=document_sets,
+
+    retriever = PostgresRetriever(
+        filenames=filenames,
         query_embedding=query_embedding,
         query=question,
-        bm25_indexes=all_bm25_indexes,
     )
 
     # =========================
@@ -408,7 +446,10 @@ async def ask_document_langchain(
     )
 
     prompt = PromptTemplate(
-        input_variables=["context", "question"],
+        input_variables=[
+            "context",
+            "question",
+        ],
         template=f"""
 You are a helpful document assistant.
 
@@ -471,7 +512,7 @@ QUESTION
         )
 
     # =========================
-    # STREAM
+    # STREAM RESPONSE
     # =========================
 
     if stream:
@@ -506,7 +547,11 @@ QUESTION
                     )
 
             yield format_sse(
-                json.dumps({"done": True}),
+                json.dumps(
+                    {
+                        "done": True,
+                    }
+                ),
                 event="done",
             )
 
@@ -515,7 +560,7 @@ QUESTION
         return _stream()
 
     # =========================
-    # JSON RESPONSE
+    # NORMAL RESPONSE
     # =========================
 
     chain = RetrievalQA.from_chain_type(

@@ -1,5 +1,7 @@
 import os
 
+os.environ["UNSTRUCTURED_SKIP_TORCH"] = "1"
+
 from unstructured.partition.pdf import partition_pdf
 
 # from docling.document_converter import DocumentConverter
@@ -13,7 +15,6 @@ from app.config.settings import TOP_K, CHUNK_SIZE
 from app.utils.helpers import timer
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
-os.environ["UNSTRUCTURED_SKIP_TORCH"] = "1"
 # os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 logging.getLogger("docling").setLevel(logging.ERROR)
 
@@ -115,7 +116,7 @@ def group_pages(
         batch = pages[start : start + window_size]
 
         combined_text = "\n\n".join(page["text"] for page in batch).strip()
-
+        combined_text = clean_text(combined_text)
         grouped_pages.append(
             {
                 "page": batch[0]["page"],
@@ -148,7 +149,7 @@ def chunk_pages(grouped_pages: list[dict]):
         chunks = text_splitter.split_text(page_group["text"])
 
         for chunk in chunks:
-
+            chunk = clean_text(chunk)
             documents.append(
                 {
                     "page": page_group["page"],
@@ -205,6 +206,13 @@ def process_document_pages(pages: list[dict]):
     return documents
 
 
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
+
+    return text.replace("\x00", "").replace("\u0000", "").strip()  # ❗ critical fix
+
+
 # =========================
 # PDF EXTRACTION
 # =========================
@@ -216,10 +224,11 @@ def extract_pdf_text(pdf_path: str) -> list[dict]:
     print("\nExtracting PDF with Unstructured (fast mode)...")
 
     elements = partition_pdf(
-        pdf_path,
+        filename=str(pdf_path),
         strategy="fast",
         include_page_breaks=True,
     )
+    print("elements:", len(elements))
 
     extracted = []
     current_page = 1

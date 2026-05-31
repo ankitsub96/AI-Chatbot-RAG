@@ -8,10 +8,12 @@ import numpy as np
 from unstructured.partition.pdf import partition_pdf
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import logging
+from sqlmodel import Session
+from sqlalchemy import text
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
-from app.config.settings import TOP_K, CHUNK_SIZE
+from app.config.settings import TOP_K, CHUNK_SIZE, UPLOAD_DIR
 from app.services.llm_service import generate_response
 from app.utils.file_utils import get_index_path, get_metadata_path, load_documents
 from app.utils.helpers import timer
@@ -28,12 +30,13 @@ from app.services.memory_service import (
 )
 from app.services.vector_search_service import (
     create_embedding,
-    load_index_and_metadata,
-    semantic_search,
+    # load_index_and_metadata,
+    # semantic_search,
     create_embeddings,
-    create_hnsw_index,
-    save_faiss_index,
-    load_faiss_index,
+    # create_hnsw_index,
+    # save_faiss_index,
+    # load_faiss_index,
+    hybrid_document_search_multiple,
 )
 from app.services.pdf_service import (
     group_pages,
@@ -41,13 +44,16 @@ from app.services.pdf_service import (
     process_document_pages,
     extract_pdf_text,
 )
-from app.services.vector_search_service import (
-    build_bm25_index,
-    save_bm25_index,
-    load_bm25_index,
-    hybrid_search,
-)
+
+# from app.services.vector_search_service import (
+# build_bm25_index,
+# save_bm25_index,
+# load_bm25_index,
+# hybrid_search,
+# )
 from app.utils.file_utils import get_bm25_path
+from app.services.database import engine
+from app.models.document_chunk import DocumentChunk
 
 # =========================
 # EMBEDDING CONFIG
@@ -55,6 +61,9 @@ from app.utils.file_utils import get_bm25_path
 
 EMBEDDING_BATCH_SIZE = 8  # reduce if laptop struggles (try 4)
 CHECKPOINT_EVERY = 50  # embed and report every N chunks
+
+MAX_CONCURRENT_EMBEDDING_BATCHES = 1
+INSERT_BATCH_SIZE = 50
 
 # =========================
 # BUILD VECTOR DATABASE
@@ -64,7 +73,9 @@ CHECKPOINT_EVERY = 50  # embed and report every N chunks
 @timer
 async def build_vector_database(filename: str):
 
-    pdf_path = f"app/uploads/{filename}"
+    pdf_path = UPLOAD_DIR / filename
+
+    print({"pdf_path": pdf_path})
 
     print("\n" + "=" * 80)
     print("BUILDING VECTOR DATABASE")
@@ -76,144 +87,161 @@ async def build_vector_database(filename: str):
     # PDF EXTRACTION
     # =========================
 
-    print("\nExtracting PDF text...")
-
-    pages = extract_pdf_text(pdf_path)
-
-    # =========================================================
-    # PAGE GROUPING
-    # =========================================================
-
-    grouped_pages = group_pages(pages)
-
-    # =========================================================
-    # CHUNKING
-    # =========================================================
-
-    documents = chunk_pages(grouped_pages)
+    pages = await asyncio.to_thread(
+        extract_pdf_text,
+        pdf_path,
+    )
 
     # =========================
-    # EMBEDDING TEXT PREP
+    # CHUNKING
+    # =========================
+
+    grouped_pages = await asyncio.to_thread(
+        group_pages,
+        pages,
+    )
+
+    documents = await asyncio.to_thread(
+        chunk_pages,
+        grouped_pages,
+    )
+
+    print(f"Chunks created: {len(documents)}")
+
+    # =========================
+    # PREPARE TEXTS
     # =========================
 
     texts = [f"""
-        Represent this document for retrieval.
+Represent this document for retrieval.
 
-        Page:
-        {doc.get('page', '')}
+Page:
+{doc.get('page', '')}
 
-        Section:
-        {doc.get('section', '')}
+Section:
+{doc.get('section', '')}
 
-        Type:
-        {doc.get('type', '')}
+Type:
+{doc.get('type', '')}
 
-        Content:
-        {doc['text']}
-        """ for doc in documents]
+Content:
+{doc['text']}
+""" for doc in documents]
 
-    # =========================
-    # BATCH EMBEDDINGS WITH CHECKPOINTING
-    # =========================
-
-    print(f"\nGenerating embeddings...")
-    print(
-        f"Batch size: {EMBEDDING_BATCH_SIZE} | "
-        f"Checkpoint every: {CHECKPOINT_EVERY} chunks"
-    )
-
-    all_embeddings = []
     total = len(texts)
 
-    for i in range(0, total, CHECKPOINT_EVERY):
+    inserted = 0
 
-        batch_texts = texts[i : i + CHECKPOINT_EVERY]
+    # =========================
+    # OPTIONAL REBUILD
+    # =========================
 
-        print(
-            f"\nEmbedding chunks {i + 1}–{min(i + CHECKPOINT_EVERY, total)} "
-            f"of {total}..."
+    with Session(engine) as session:
+
+        session.exec(
+            text("""
+                DELETE FROM document_chunks
+                WHERE filename = :filename
+                """),
+            {
+                "filename": filename,
+            },
         )
 
-        batch_embeddings = create_embeddings(
-            batch_texts,
-            batch_size=EMBEDDING_BATCH_SIZE,
-            show_progress_bar=True,
-        )
-
-        all_embeddings.append(batch_embeddings)
-
-        print(f"Done — {batch_embeddings.shape[0]} vectors embedded")
-
-    embeddings = np.vstack(all_embeddings)
-
-    print(f"\nFinal embedding shape: {embeddings.shape}")
+        session.commit()
 
     # =========================
-    # INDEX CREATION
+    # EMBEDDINGS
     # =========================
 
-    print("\nCreating FAISS HNSW index...")
+    with Session(engine) as session:
 
-    # index = create_hnsw_index(
-    #     embeddings=embeddings,
-    #     hnsw_m=32,
-    #     ef_construction=200,
-    # )
-    faiss_task = asyncio.to_thread(
-        create_hnsw_index,
-        embeddings,
-        32,
-        200,
-    )
+        for start in range(
+            0,
+            total,
+            CHECKPOINT_EVERY,
+        ):
 
-    bm25_task = asyncio.to_thread(
-        build_bm25_index,
-        documents,
-    )
-
-    index, bm25_index = await asyncio.gather(
-        faiss_task,
-        bm25_task,
-    )
-
-    print({"total_vectors": index.ntotal})
-
-    # =========================
-    # SAVE PATHS
-    # =========================
-
-    index_path = get_index_path(filename)
-    metadata_path = get_metadata_path(filename)
-    bm25_path = get_bm25_path(filename)
-
-    print({"index_path": index_path, "metadata_path": metadata_path})
-
-    # =========================
-    # SAVE INDEX
-    # =========================
-
-    print("\nSaving FAISS index...")
-
-    await asyncio.gather(
-        asyncio.to_thread(save_faiss_index, index, index_path),
-        asyncio.to_thread(save_bm25_index, bm25_index, bm25_path),
-        asyncio.to_thread(
-            lambda: json.dump(
-                documents,
-                open(metadata_path, "w", encoding="utf-8"),
-                ensure_ascii=False,
-                indent=2,
+            end = min(
+                start + CHECKPOINT_EVERY,
+                total,
             )
-        ),
-    )
+
+            print(f"\nEmbedding chunks " f"{start + 1}-{end} " f"of {total}")
+
+            batch_texts = texts[start:end]
+
+            batch_docs = documents[start:end]
+
+            embeddings = await asyncio.to_thread(
+                create_embeddings,
+                batch_texts,
+                EMBEDDING_BATCH_SIZE,
+                True,
+            )
+
+            rows = []
+
+            for doc, embedding in zip(
+                batch_docs,
+                embeddings,
+            ):
+
+                rows.append(
+                    DocumentChunk(
+                        filename=filename,
+                        page=doc.get("page"),
+                        section=doc.get("section"),
+                        chunk_type=doc.get("type"),
+                        text=doc["text"],
+                        chunk_metadata=doc,
+                        embedding=embedding.tolist(),
+                    )
+                )
+
+            for i in range(
+                0,
+                len(rows),
+                INSERT_BATCH_SIZE,
+            ):
+
+                session.add_all(rows[i : i + INSERT_BATCH_SIZE])
+
+            session.commit()
+
+            inserted += len(rows)
+
+            print(f"Inserted " f"{inserted}/{total} chunks")
+
+            del embeddings
+            del rows
+
+        # =========================
+        # BUILD TSVECTOR
+        # =========================
+
+        session.exec(
+            text("""
+                UPDATE document_chunks
+                SET tsv = to_tsvector(
+                    'simple',
+                    text
+                )
+                WHERE filename = :filename
+                """),
+            {
+                "filename": filename,
+            },
+        )
+
+        session.commit()
 
     print("\n" + "=" * 80)
     print("VECTOR DATABASE READY")
     print("=" * 80)
 
-    print(f"Saved index:          {index_path}")
-    print(f"Saved metadata:       {metadata_path}")
-    print(f"Total chunks indexed: {len(documents)}")
+    print(f"Stored chunks: {inserted}")
+
     print("=" * 80)
 
 
@@ -252,18 +280,32 @@ async def ask_document(
     session_id: str,
     background_tasks: BackgroundTasks,
 ):
-
     print("\n" + "=" * 80)
     print("NEW QUESTION")
     print("=" * 80)
 
-    print({"filename": filename, "question": question, "session_id": session_id})
+    print(
+        {
+            "filenames": filenames,
+            "question": question,
+            "session_id": session_id,
+        }
+    )
+
+    # =========================
+    # CACHE KEY
+    # =========================
+
+    cache_key = "|".join(sorted(filenames))
 
     # =========================
     # EXACT CACHE
     # =========================
 
-    exact_cached = get_exact_cache(filename, question)
+    exact_cached = get_exact_cache(
+        cache_key,
+        question,
+    )
 
     if exact_cached:
 
@@ -277,13 +319,19 @@ async def ask_document(
 
     print("\nGenerating query embedding...")
 
-    query_embedding = create_embedding(question)
+    query_embedding = await asyncio.to_thread(
+        create_embedding,
+        question,
+    )
 
     # =========================
     # SEMANTIC CACHE
     # =========================
 
-    semantic_cached = get_semantic_cache(filename, query_embedding)
+    semantic_cached = get_semantic_cache(
+        cache_key,
+        query_embedding,
+    )
 
     if semantic_cached:
 
@@ -292,47 +340,8 @@ async def ask_document(
         return semantic_cached
 
     # =========================
-    # FILE VALIDATION
+    # PARALLEL LOAD
     # =========================
-
-    index_path = get_index_path(filename)
-
-    metadata_path = get_metadata_path(filename)
-
-    print({"index_path": index_path, "metadata_path": metadata_path})
-
-    if not os.path.exists(index_path):
-
-        raise HTTPException(
-            status_code=404, detail=(f"Document '{filename}' " f"is still processing")
-        )
-
-    if not os.path.exists(metadata_path):
-
-        raise HTTPException(
-            status_code=404,
-            detail=(f"Metadata for '{filename}' " f"is still processing"),
-        )
-
-    # =========================
-    # PARALLEL LOADING
-    # =========================
-
-    print("\nLoading retrieval systems in parallel...")
-
-    bm25_path = get_bm25_path(filename)
-
-    index_metadata_task = asyncio.to_thread(
-        load_index_and_metadata,
-        index_path,
-        metadata_path,
-    )
-
-    bm25_task = (
-        asyncio.to_thread(load_bm25_index, bm25_path)
-        if os.path.exists(bm25_path)
-        else asyncio.sleep(0, result=None)
-    )
 
     memory_task = asyncio.to_thread(
         retrieve_relevant_memories,
@@ -340,114 +349,78 @@ async def ask_document(
         question,
     )
 
-    summary_task = asyncio.to_thread(
-        load_summary,
-        session_id,
+    document_task = asyncio.to_thread(
+        hybrid_document_search_multiple,
+        filenames,
+        question,
+        query_embedding,
+        TOP_K,
     )
 
     (
-        index_metadata,
-        bm25_index,
         memory_context,
-        summary,
+        results,
     ) = await asyncio.gather(
-        index_metadata_task,
-        bm25_task,
         memory_task,
-        summary_task,
+        document_task,
     )
 
-    index, documents = index_metadata
-
     # =========================
-    # HYBRID SEARCH
+    # SEARCH RESULTS
     # =========================
-
-    print("\nRunning vector similarity search...")
-
-    if bm25_index is not None:
-
-        print("Mode: Hybrid (FAISS + BM25)")
-
-        results = hybrid_search(
-            faiss_index=index,
-            bm25_index=bm25_index,
-            metadata=documents,
-            query_embedding=query_embedding,
-            query=question,
-            top_k=TOP_K,
-        )
-
-    else:
-
-        print("Mode: Semantic only (BM25 index not found)")
-
-        results = semantic_search(
-            index=index,
-            metadata=documents,
-            query_embedding=query_embedding,
-            top_k=TOP_K,
-        )
-
-    context = ""
 
     print("\n" + "=" * 80)
     print("SEARCH RESULTS")
     print("=" * 80)
 
-    for rank, result in enumerate(results, start=1):
+    context = ""
+
+    for rank, result in enumerate(
+        results,
+        start=1,
+    ):
 
         score = result["score"]
 
         doc = result["data"]
 
-        print(f"\nRESULT #{rank}")
-
-        print("-" * 80)
-
-        print(f"Page: {doc['page']}")
-
-        print(f"Score: {score}")
-
-        if bm25_index is not None:
-            print(f"FAISS Score: {result.get('faiss_score', 'n/a')}")
-            print(f"BM25 Score:  {result.get('bm25_score', 'n/a')}")
-
-        print("\nCHUNK:")
-
-        print(doc["text"][:1000])
-
-        print("-" * 80)
+        print(
+            {
+                "rank": rank,
+                "score": score,
+                "page": doc.get("page"),
+                "file": doc.get("filename"),
+            }
+        )
 
         context += f"""
 
-[Page {doc['page']}]
+[FILE: {doc.get('filename')}]
 
-{doc['text']}
+[PAGE: {doc.get('page')}]
+
+{doc.get('text')}
+
 """
 
     # =========================
-    # FINAL PROMPT
+    # PROMPT
     # =========================
 
     prompt = f"""
-You are a helpful PDF assistant.
+You are a helpful document assistant.
+
+You may receive context from multiple documents.
 
 Use:
-1. relevant document context
-2. relevant past conversation memory
-3. system summary
+1. Retrieved document context
+2. Relevant conversation memory
 
-Only answer confidently when supported.
+Only answer when supported by context.
 
-If uncertain, say:
-"I could not find that in the document."
+If uncertain say:
 
-==================================================
-SYSTEM SUMMARY
-==================================================
-
-{summary}
+"I could not find that in the documents."
 
 ==================================================
 RELEVANT PAST CONVERSATIONS
@@ -462,7 +435,7 @@ DOCUMENT CONTEXT
 {context}
 
 ==================================================
-CURRENT QUESTION
+QUESTION
 ==================================================
 
 {question}
@@ -483,7 +456,13 @@ CURRENT QUESTION
     print("\nGenerating LLM response...")
 
     response = generate_response(
-        messages=[{"role": "user", "content": prompt}], temperature=0
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        temperature=0,
     )
 
     answer = response.choices[0].message.content
@@ -494,14 +473,26 @@ CURRENT QUESTION
     # BACKGROUND TASKS
     # =========================
 
-    print("\nScheduling background tasks...")
-
-    background_tasks.add_task(set_exact_cache, filename, question, answer)
-
     background_tasks.add_task(
-        set_semantic_cache, filename, question, query_embedding, answer
+        set_exact_cache,
+        cache_key,
+        question,
+        answer,
     )
 
-    background_tasks.add_task(save_conversation_turn, session_id, question, answer)
+    background_tasks.add_task(
+        set_semantic_cache,
+        cache_key,
+        question,
+        query_embedding,
+        answer,
+    )
+
+    background_tasks.add_task(
+        save_conversation_turn,
+        session_id,
+        question,
+        answer,
+    )
 
     return answer
