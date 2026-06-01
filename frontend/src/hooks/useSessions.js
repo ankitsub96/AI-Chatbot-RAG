@@ -13,8 +13,9 @@ export function useSessions() {
 
   useEffect(() => { refresh() }, [refresh])
 
-  const createSession = useCallback(() => {
-    const id = `session-${Date.now()}`
+  // accepts custom name, falls back to timestamp 
+  const createSession = useCallback((name) => {
+    const id = (name || '').trim() || `session-${Date.now()}`
     setSessions(prev => [id, ...prev])
     return id
   }, [])

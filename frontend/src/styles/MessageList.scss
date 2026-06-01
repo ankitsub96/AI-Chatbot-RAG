@@ -20,7 +20,9 @@
     align-items: flex-end;
     max-width: 68%;
 
-    .message__meta { flex-direction: row-reverse; }
+    .message__meta {
+      flex-direction: row-reverse;
+    }
 
     .message__content {
       background: $accent-soft;
@@ -38,7 +40,6 @@
     .message__content {
       background: $bg2;
       border: 1px solid $border;
-      border-left: 2px solid #f0b429;
       border-left: 2px solid $accent;
       border-radius: 2px $radius $radius $radius;
       color: $text;
@@ -57,8 +58,13 @@
     font-weight: 500;
     color: $text-dim;
 
-    .message--user & { color: $text-dim; }
-    .message--assistant & { color: $accent-mid; }
+    .message--user & {
+      color: $text-dim;
+    }
+
+    .message--assistant & {
+      color: $accent-mid;
+    }
   }
 
   &__time {
@@ -102,8 +108,13 @@
       background: $text-dim;
       animation: dot-bounce 1.2s ease-in-out infinite;
 
-      &:nth-child(2) { animation-delay: 0.15s; }
-      &:nth-child(3) { animation-delay: 0.3s; }
+      &:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+
+      &:nth-child(3) {
+        animation-delay: 0.3s;
+      }
     }
   }
 }
@@ -129,16 +140,39 @@
 }
 
 @keyframes msg-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes cursor-blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
 }
 
 @keyframes dot-bounce {
-  0%, 100% { transform: translateY(0); opacity: 0.4; }
-  50%       { transform: translateY(-3px); opacity: 1; }
+
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+
+  50% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
 }

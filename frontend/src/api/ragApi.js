@@ -6,6 +6,16 @@ const api = axios.create({ baseURL: '' })
 export const getDocuments = () =>
   api.get('/rag/documents').then(r => r.data.documents)
 
+
+export const uploadDocument = (file, onProgress) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/rag/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: e => onProgress?.(Math.round(e.loaded * 100 / e.total)),
+  }).then(r => r.data)
+}
+
 // ── Sessions ─────────────────────────────────────────────
 export const getSessions = () =>
   api.get('/rag/sessions').then(r => r.data.sessions)
@@ -17,13 +27,11 @@ export const deleteSession = (sessionId) =>
   api.delete(`/rag/sessions/${sessionId}`).then(r => r.data)
 
 // ── Ask — JSON ────────────────────────────────────────────
-export const askDocument = (filenames, question, sessionId) =>
-  api.post('/rag/ask/langchain', { filenames, question, session_id: sessionId })
+export const askDocument = (filename, question, sessionId) =>
+  api.post('/rag/ask/langchain', { filename, question, session_id: sessionId })
     .then(r => r.data)
 
 // ── Ask — Stream ──────────────────────────────────────────
-// Returns a fetch response for manual stream reading
-// (axios doesn't support streaming natively)
 export const askDocumentStream = (filenames, question, sessionId) =>
   fetch('/rag/ask/langchain?stream=true', {
     method: 'POST',

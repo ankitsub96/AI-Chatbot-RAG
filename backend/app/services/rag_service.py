@@ -139,11 +139,11 @@ Content:
 
     with Session(engine) as session:
 
-        session.exec(
+        session.execute(
             text("""
                 DELETE FROM document_chunks
                 WHERE filename = :filename
-                """),
+            """),
             {
                 "filename": filename,
             },
@@ -221,7 +221,7 @@ Content:
         # BUILD TSVECTOR
         # =========================
 
-        session.exec(
+        session.execute(
             text("""
                 UPDATE document_chunks
                 SET tsv = to_tsvector(

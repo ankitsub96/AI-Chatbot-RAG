@@ -10,10 +10,6 @@ function Chat() {
   const navigate = useNavigate()
 
   const handleSelect = (id) => navigate(`/chat/${id}`)
-  const handleCreate = () => {
-    const id = createSession()
-    navigate(`/chat/${id}`)
-  }
   const handleDelete = async (id) => {
     await removeSession(id)
     navigate('/')
@@ -25,7 +21,7 @@ function Chat() {
         sessions={sessions}
         activeId={sessionId}
         onSelect={handleSelect}
-        onCreate={handleCreate}
+        onCreate={createSession}
         onDelete={handleDelete}
       />
       <ChatWindow
@@ -48,10 +44,7 @@ export default function App() {
             sessions={sessions}
             activeId={null}
             onSelect={(id) => navigate(`/chat/${id}`)}
-            onCreate={() => {
-              const id = `session-${Date.now()}`
-              navigate(`/chat/${id}`)
-            }}
+            onCreate={createSession}
             onDelete={async (id) => { await removeSession(id); navigate('/') }}
           />
           <ChatWindow sessionId={null} loadHistory={loadHistory} />

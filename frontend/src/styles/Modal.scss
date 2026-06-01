@@ -1,0 +1,216 @@
+@use './global' as *;
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: overlay-in 0.15s ease;
+}
+
+.modal {
+  background: $bg2;
+  border: 1px solid $border2;
+  border-radius: $radius;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+  animation: modal-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid $border;
+  }
+
+  &__title {
+    font-size: 14px;
+    font-weight: 600;
+    color: $text;
+  }
+
+  &__close {
+    color: $text-dim;
+    font-size: 14px;
+    padding: 4px 6px;
+    border-radius: $radius-sm;
+    transition: all 0.15s;
+
+    &:hover { color: $text; background: $bg3; }
+  }
+
+  &__body {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__label {
+    font-size: 12px;
+    font-weight: 500;
+    color: $text-muted;
+  }
+
+  &__input {
+    background: $bg3;
+    border: 1px solid $border;
+    border-radius: $radius-sm;
+    padding: 9px 12px;
+    font-size: 14px;
+    color: $text;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    width: 100%;
+
+    &:focus {
+      border-color: $accent;
+      box-shadow: 0 0 0 3px rgba($accent, 0.1);
+    }
+
+    &::placeholder { color: $text-dim; }
+  }
+
+  &__hint {
+    font-size: 11px;
+    color: $text-dim;
+  }
+
+  &__success {
+    font-size: 12px;
+    color: $green;
+    font-weight: 500;
+  }
+
+  &__error {
+    font-size: 12px;
+    color: $red;
+  }
+
+  &__footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid $border;
+  }
+
+  &__btn {
+    padding: 7px 16px;
+    border-radius: $radius-sm;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.15s;
+
+    &--ghost {
+      background: transparent;
+      border: 1px solid $border;
+      color: $text-muted;
+
+      &:hover { background: $bg3; color: $text; }
+    }
+
+    &--primary {
+      background: $accent;
+      border: 1px solid $accent;
+      color: #fff;
+
+      &:hover:not(:disabled) { opacity: 0.88; }
+      &:disabled { opacity: 0.4; cursor: not-allowed; }
+    }
+  }
+}
+
+// ── Upload zone ───────────────────────────────────────────
+.upload-zone {
+  border: 1px dashed $border2;
+  border-radius: $radius;
+  padding: 28px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+
+  &:hover {
+    border-color: $accent;
+    background: $accent-soft;
+  }
+
+  &--has-file {
+    border-style: solid;
+    border-color: $accent;
+    background: $accent-soft;
+  }
+
+  &__icon {
+    font-size: 24px;
+    line-height: 1;
+  }
+
+  &__text {
+    font-size: 13px;
+    color: $text-muted;
+  }
+
+  &__name {
+    font-size: 13px;
+    font-weight: 500;
+    color: $text;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__size {
+    font-size: 11px;
+    color: $text-muted;
+    font-family: $font-mono;
+  }
+}
+
+// ── Upload progress ───────────────────────────────────────
+.upload-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  &__bar {
+    height: 3px;
+    background: $bg4;
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  &__fill {
+    height: 100%;
+    background: $accent;
+    border-radius: 99px;
+    transition: width 0.2s ease;
+  }
+
+  &__label {
+    font-size: 11px;
+    color: $text-muted;
+    font-family: $font-mono;
+  }
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}

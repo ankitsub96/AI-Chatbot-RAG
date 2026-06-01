@@ -6,15 +6,15 @@ import MessageList from './MessageList'
 import ChatInput from './ChatInput'
 import '../styles/ChatWindow.scss'
 
-export default function ChatWindow({ sessionId, loadHistory }) { 
-  const [streaming, setStreaming]   = useState(true)
+export default function ChatWindow({ sessionId, loadHistory }) {
+  const [streaming, setStreaming] = useState(true)
   const [docOpen, setDocOpen] = useState(false)
 
   const { documents, filenames, setFilename, toggleFile } = useDocumentSelection(sessionId)
   const { messages, loading, streamingMsg, send, setMessages } = useChat(
     filenames, sessionId, streaming
   )
- 
+
 
 
   // load history when session changes
@@ -22,8 +22,8 @@ export default function ChatWindow({ sessionId, loadHistory }) {
     if (!sessionId) { setMessages([]); return }
     loadHistory(sessionId).then(items => {
       setMessages(items.map(item => ([
-        { role: 'user',      content: item.question },
-        { role: 'assistant', content: item.answer   },
+        { role: 'user', content: item.question },
+        { role: 'assistant', content: item.answer },
       ])).flat())
     })
   }, [sessionId])

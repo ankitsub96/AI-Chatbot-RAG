@@ -2,8 +2,8 @@ import { useState, useCallback } from 'react'
 import { askDocument, askDocumentStream } from '../api/ragApi'
 
 export function useChat(filenames, sessionId, streaming) {
-  const [messages, setMessages]   = useState([])
-  const [loading, setLoading]     = useState(false)
+  const [messages, setMessages] = useState([])
+  const [loading, setLoading] = useState(false)
   const [streamingMsg, setStreamingMsg] = useState('')
 
   const appendUser = (text) =>
@@ -13,7 +13,7 @@ export function useChat(filenames, sessionId, streaming) {
     setMessages(prev => [...prev, { role: 'assistant', content: text }])
 
   const send = useCallback(async (question) => {
-    if (!question.trim() || loading || !filenames.length) return
+    if (!question.trim() || loading) return
 
     appendUser(question)
     setLoading(true)
@@ -22,8 +22,8 @@ export function useChat(filenames, sessionId, streaming) {
     try {
       if (streaming) {
         const response = await askDocumentStream(filenames, question, sessionId)
-        const reader   = response.body.getReader()
-        const decoder  = new TextDecoder()
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
         let full = ''
 
         while (true) {

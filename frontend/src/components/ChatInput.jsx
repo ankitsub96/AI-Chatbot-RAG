@@ -21,22 +21,22 @@ export default function ChatInput({ onSend, loading, streaming, onToggleStream }
     <div className="chat-input">
       <div className="chat-input__toolbar">
         <label className="chat-input__toggle">
-          <input
-            type="checkbox"
-            checked={streaming}
-            onChange={onToggleStream}
-          />
-          <span>Stream</span>
+          <input type="checkbox" checked={streaming} onChange={onToggleStream} />
+          Stream response
         </label>
+        <span className="chat-input__hint">
+          <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for newline
+        </span>
       </div>
 
       <div className="chat-input__row">
+        <span className="chat-input__prefix">›_</span>
         <textarea
           className="chat-input__area"
           value={value}
           onChange={e => setValue(e.target.value)}
           onKeyDown={onKey}
-          placeholder="Ask about the document..."
+          placeholder="Enter your query..."
           rows={1}
           disabled={loading}
         />
@@ -45,7 +45,7 @@ export default function ChatInput({ onSend, loading, streaming, onToggleStream }
           onClick={submit}
           disabled={loading || !value.trim()}
         >
-          {loading ? '…' : '↑'}
+          {loading ? '…' : '⏎'}
         </button>
       </div>
     </div>

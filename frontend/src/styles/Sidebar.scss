@@ -29,6 +29,32 @@
     }
   }
 
+  &__header-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  &__action {
+    width: 28px;
+    height: 28px;
+    border-radius: $radius-sm;
+    background: $bg3;
+    border: 1px solid $border;
+    color: $text-muted;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+    &:hover {
+      background: $accent-soft;
+      border-color: $accent;
+      color: $accent-mid;
+    }
+  }
+
   &__new {
     width: 28px;
     height: 28px;
