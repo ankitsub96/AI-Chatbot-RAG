@@ -30,5 +30,5 @@ export function useSessions() {
     } catch { return [] }
   }, [])
 
-  return { sessions, removeSession, loadHistory, refresh }
+  return { sessions, createSession, removeSession, loadHistory, refresh }
 }

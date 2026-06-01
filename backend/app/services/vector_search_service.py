@@ -367,6 +367,14 @@ def hybrid_document_search(
     top_k: int,
 ):
     print("ENTER hybrid_document_search")
+    print(
+        {
+            "filename": filename,
+            "query": query,
+            "semantic_results": len(semantic_results),
+            "keyword_results": len(keyword_results),
+        }
+    )
     semantic_results = semantic_document_search(
         filename=filename,
         query_embedding=query_embedding,
@@ -434,7 +442,20 @@ def hybrid_document_search(
         key=lambda x: x["score"],
         reverse=True,
     )
+    for rank, row in enumerate(results[:10], start=1):
 
+        print(
+            {
+                "rank": rank,
+                "page": row.get("page"),
+                "hybrid_score": row.get("hybrid_score"),
+                "semantic_score": row.get("semantic_score"),
+                "keyword_score": row.get("keyword_score"),
+            }
+        )
+
+        print(row["text"][:500])
+        print("-" * 80)
     return results[:top_k]
 
 

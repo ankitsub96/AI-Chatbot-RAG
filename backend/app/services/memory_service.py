@@ -425,12 +425,25 @@ def get_session_history(
 
     start = (page - 1) * page_size
     end = start + page_size
+    items = []
 
+    for row in rows[start:end]:
+        item = row.model_dump()
+        # print(item)
+        items.append(item)
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": rows[start:end],
+        "items": [
+            {
+                "id": row["id"],
+                "question": row["question"],
+                "answer": row["answer"],
+                "created_at": row["created_at"],
+            }
+            for row in items
+        ],
     }
 
 

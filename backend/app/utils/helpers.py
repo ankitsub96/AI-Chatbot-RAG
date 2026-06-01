@@ -4,6 +4,7 @@ import asyncio
 import functools
 from collections import defaultdict
 import threading
+import json
 
 _lock = threading.Lock()
 _active_counts = defaultdict(int)
@@ -64,3 +65,26 @@ def timer(func):
         return async_wrapper
 
     return sync_wrapper
+
+
+def format_sse(data: str, event: str = "message") -> str:
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def thinking(stage: str, message: str, data: dict = None):
+    return format_sse(
+        json.dumps(
+            {"type": "thinking", "stage": stage, "message": message, "data": data or {}}
+        ),
+        event="thinking",
+    )
+
+
+def token_event(token: str):
+    return format_sse(
+        json.dumps({"type": "response", "token": token}), event="response"
+    )
+
+
+def done_event():
+    return format_sse(json.dumps({"type": "done"}), event="done")

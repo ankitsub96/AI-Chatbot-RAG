@@ -123,16 +123,26 @@ async def ask_pdf_langchain(
     background_tasks: BackgroundTasks,
     stream: bool = False,
 ):
-    answer = await ask_document_langchain(
+
+    result = await ask_document_langchain(
         payload.filenames,
         payload.question,
         payload.session_id,
         background_tasks,
         stream=stream,
     )
+
+    # =========================
+    # STREAM MODE
+    # =========================
     if stream:
+
+        # ensure it's actually a generator
+        if not hasattr(result, "__aiter__"):
+            raise ValueError("Expected async generator for streaming mode")
+
         return StreamingResponse(
-            answer,
+            result,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -140,7 +150,10 @@ async def ask_pdf_langchain(
             },
         )
 
-    return {"answer": answer}
+    # =========================
+    # NORMAL MODE
+    # =========================
+    return {"answer": result}
 
 
 @router.get("/sessions")

@@ -8,7 +8,7 @@ import numpy as np
 from unstructured.partition.pdf import partition_pdf
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import logging
-from sqlmodel import Session
+from sqlmodel import Session, select
 from sqlalchemy import text
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
@@ -52,6 +52,7 @@ from app.services.pdf_service import (
 # hybrid_search,
 # )
 from app.utils.file_utils import get_bm25_path
+from app.utils.helpers import thinking
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
 
@@ -252,21 +253,11 @@ Content:
 
 def list_ready_documents():
 
-    files = []
+    with Session(engine) as session:
 
-    metadata_dir = "app/vector_store/metadata"
+        rows = session.exec(select(DocumentChunk.filename).distinct()).all()
 
-    if not os.path.exists(metadata_dir):
-
-        return []
-
-    for file in os.listdir(metadata_dir):
-
-        if file.endswith(".json"):
-
-            files.append(file.replace(".json", ".pdf"))
-
-    return files
+        return sorted(rows)
 
 
 # =========================
@@ -308,9 +299,7 @@ async def ask_document(
     )
 
     if exact_cached:
-
         print("\nEXACT CACHE HIT")
-
         return exact_cached
 
     # =========================
@@ -334,9 +323,7 @@ async def ask_document(
     )
 
     if semantic_cached:
-
         print("\nSEMANTIC CACHE HIT")
-
         return semantic_cached
 
     # =========================
@@ -365,6 +352,10 @@ async def ask_document(
         document_task,
     )
 
+    print(
+        "\n[document_loaded] Documents + BM25 indexes loaded"
+    )  # <-- was yield thinking(...)
+
     # =========================
     # SEARCH RESULTS
     # =========================
@@ -375,13 +366,8 @@ async def ask_document(
 
     context = ""
 
-    for rank, result in enumerate(
-        results,
-        start=1,
-    ):
-
+    for rank, result in enumerate(results, start=1):
         score = result["score"]
-
         doc = result["data"]
 
         print(
@@ -444,9 +430,7 @@ QUESTION
     print("\n" + "=" * 80)
     print("FINAL PROMPT SENT TO LLM")
     print("=" * 80)
-
     print(prompt[:12000])
-
     print("=" * 80)
 
     # =========================
