@@ -137,27 +137,39 @@ def group_pages(
 @timer
 def chunk_pages(grouped_pages: list[dict]):
     """
-    Split grouped pages into semantic chunks.
+    Parent-child chunking:
+    - parent = grouped page window
+    - children = chunks inside each parent
     """
 
-    print(f"\nChunking {len(grouped_pages)} grouped pages...")
+    print(
+        f"\nChunking {len(grouped_pages)} grouped pages with parent-child structure..."
+    )
 
     documents = []
 
-    for page_group in grouped_pages:
+    for parent_idx, page_group in enumerate(grouped_pages):
+
+        parent_id = f"parent_{parent_idx}_page_{page_group.get('page')}"
 
         chunks = text_splitter.split_text(page_group["text"])
 
-        for chunk in chunks:
+        for child_idx, chunk in enumerate(chunks):
+
             chunk = clean_text(chunk)
+
             documents.append(
                 {
                     "page": page_group["page"],
+                    "section": page_group.get("section", ""),
+                    "type": "child_chunk",
+                    "parent_id": parent_id,
+                    "child_id": f"{parent_id}_chunk_{child_idx}",
                     "text": chunk,
                 }
             )
 
-    print(f"Total chunks created: {len(documents)}")
+    print(f"Total child chunks created: {len(documents)}")
 
     return documents
 
@@ -170,21 +182,11 @@ def chunk_pages(grouped_pages: list[dict]):
 @timer
 def process_document_pages(pages: list[dict]):
     """
-    Full document chunking pipeline.
-
-    FLOW:
-
-    Extracted Pages
-        ↓
-    Group Nearby Pages
-        ↓
-    Recursive Chunking
-        ↓
-    Final Chunks
+    Full parent-child chunking pipeline.
     """
 
     print("\n" + "=" * 80)
-    print("DOCUMENT CHUNKING PIPELINE")
+    print("DOCUMENT CHUNKING PIPELINE (PARENT-CHILD)")
     print("=" * 80)
 
     grouped_pages = group_pages(pages)
@@ -196,8 +198,8 @@ def process_document_pages(pages: list[dict]):
     print(
         {
             "original_pages": len(pages),
-            "grouped_pages": len(grouped_pages),
-            "final_chunks": len(documents),
+            "parent_groups": len(grouped_pages),
+            "child_chunks": len(documents),
         }
     )
 

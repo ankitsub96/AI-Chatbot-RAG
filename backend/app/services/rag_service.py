@@ -73,48 +73,30 @@ INSERT_BATCH_SIZE = 50
 
 @timer
 async def build_vector_database(filename: str):
-
     pdf_path = UPLOAD_DIR / filename
 
     print({"pdf_path": pdf_path})
 
     print("\n" + "=" * 80)
-    print("BUILDING VECTOR DATABASE")
+    print("BUILDING VECTOR DATABASE (PARENT-CHILD)")
     print("=" * 80)
 
-    print({"filename": filename})
+    pages = await asyncio.to_thread(extract_pdf_text, pdf_path)
 
-    # =========================
-    # PDF EXTRACTION
-    # =========================
+    grouped_pages = await asyncio.to_thread(group_pages, pages)
 
-    pages = await asyncio.to_thread(
-        extract_pdf_text,
-        pdf_path,
-    )
+    documents = await asyncio.to_thread(chunk_pages, grouped_pages)
 
-    # =========================
-    # CHUNKING
-    # =========================
-
-    grouped_pages = await asyncio.to_thread(
-        group_pages,
-        pages,
-    )
-
-    documents = await asyncio.to_thread(
-        chunk_pages,
-        grouped_pages,
-    )
-
-    print(f"Chunks created: {len(documents)}")
-
-    # =========================
-    # PREPARE TEXTS
-    # =========================
+    print(f"Child chunks created: {len(documents)}")
 
     texts = [f"""
 Represent this document for retrieval.
+
+Parent ID:
+{doc.get('parent_id', '')}
+
+Child ID:
+{doc.get('child_id', '')}
 
 Page:
 {doc.get('page', '')}
@@ -122,56 +104,29 @@ Page:
 Section:
 {doc.get('section', '')}
 
-Type:
-{doc.get('type', '')}
-
 Content:
 {doc['text']}
 """ for doc in documents]
 
     total = len(texts)
-
     inserted = 0
 
-    # =========================
-    # OPTIONAL REBUILD
-    # =========================
-
     with Session(engine) as session:
-
         session.execute(
-            text("""
-                DELETE FROM document_chunks
-                WHERE filename = :filename
-            """),
-            {
-                "filename": filename,
-            },
+            text("DELETE FROM document_chunks WHERE filename = :filename"),
+            {"filename": filename},
         )
-
         session.commit()
 
-    # =========================
-    # EMBEDDINGS
-    # =========================
-
     with Session(engine) as session:
 
-        for start in range(
-            0,
-            total,
-            CHECKPOINT_EVERY,
-        ):
+        for start in range(0, total, CHECKPOINT_EVERY):
 
-            end = min(
-                start + CHECKPOINT_EVERY,
-                total,
-            )
+            end = min(start + CHECKPOINT_EVERY, total)
 
-            print(f"\nEmbedding chunks " f"{start + 1}-{end} " f"of {total}")
+            print(f"\nEmbedding chunks {start + 1}-{end} of {total}")
 
             batch_texts = texts[start:end]
-
             batch_docs = documents[start:end]
 
             embeddings = await asyncio.to_thread(
@@ -183,10 +138,7 @@ Content:
 
             rows = []
 
-            for doc, embedding in zip(
-                batch_docs,
-                embeddings,
-            ):
+            for doc, embedding in zip(batch_docs, embeddings):
 
                 rows.append(
                     DocumentChunk(
@@ -195,55 +147,43 @@ Content:
                         section=doc.get("section"),
                         chunk_type=doc.get("type"),
                         text=doc["text"],
-                        chunk_metadata=doc,
+                        chunk_metadata={
+                            **doc,
+                            "parent_id": doc.get("parent_id"),
+                            "child_id": doc.get("child_id"),
+                        },
                         embedding=embedding.tolist(),
                     )
                 )
 
-            for i in range(
-                0,
-                len(rows),
-                INSERT_BATCH_SIZE,
-            ):
-
+            for i in range(0, len(rows), INSERT_BATCH_SIZE):
                 session.add_all(rows[i : i + INSERT_BATCH_SIZE])
 
             session.commit()
 
             inserted += len(rows)
 
-            print(f"Inserted " f"{inserted}/{total} chunks")
+            print(f"Inserted {inserted}/{total} chunks")
 
             del embeddings
             del rows
 
-        # =========================
-        # BUILD TSVECTOR
-        # =========================
-
         session.execute(
             text("""
                 UPDATE document_chunks
-                SET tsv = to_tsvector(
-                    'simple',
-                    text
-                )
+                SET tsv = to_tsvector('simple', text)
                 WHERE filename = :filename
-                """),
-            {
-                "filename": filename,
-            },
+            """),
+            {"filename": filename},
         )
 
         session.commit()
 
     print("\n" + "=" * 80)
-    print("VECTOR DATABASE READY")
+    print("VECTOR DATABASE READY (PARENT-CHILD)")
     print("=" * 80)
 
     print(f"Stored chunks: {inserted}")
-
-    print("=" * 80)
 
 
 # =========================
