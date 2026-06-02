@@ -55,6 +55,8 @@ from app.utils.file_utils import get_bm25_path
 from app.utils.helpers import thinking
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
+from app.models.document import Document
+from app.models.session_document import SessionDocument
 
 # =========================
 # EMBEDDING CONFIG
@@ -72,19 +74,17 @@ INSERT_BATCH_SIZE = 50
 
 
 @timer
-async def build_vector_database(filename: str):
-    pdf_path = UPLOAD_DIR / filename
+@timer
+async def build_vector_database(document_id: str, stored_filename: str):
+    pdf_path = UPLOAD_DIR / stored_filename
 
     print({"pdf_path": pdf_path})
-
     print("\n" + "=" * 80)
     print("BUILDING VECTOR DATABASE (PARENT-CHILD)")
     print("=" * 80)
 
     pages = await asyncio.to_thread(extract_pdf_text, pdf_path)
-
     grouped_pages = await asyncio.to_thread(group_pages, pages)
-
     documents = await asyncio.to_thread(chunk_pages, grouped_pages)
 
     print(f"Child chunks created: {len(documents)}")
@@ -111,17 +111,16 @@ Content:
     total = len(texts)
     inserted = 0
 
+    # delete any existing chunks for this document (safe re-index)
     with Session(engine) as session:
         session.execute(
-            text("DELETE FROM document_chunks WHERE filename = :filename"),
-            {"filename": filename},
+            text("DELETE FROM document_chunks WHERE document_id = :document_id"),
+            {"document_id": document_id},
         )
         session.commit()
 
     with Session(engine) as session:
-
         for start in range(0, total, CHECKPOINT_EVERY):
-
             end = min(start + CHECKPOINT_EVERY, total)
 
             print(f"\nEmbedding chunks {start + 1}-{end} of {total}")
@@ -137,21 +136,20 @@ Content:
             )
 
             rows = []
-
-            for doc, embedding in zip(batch_docs, embeddings):
-
+            for chunk_index, (doc, embedding) in enumerate(
+                zip(batch_docs, embeddings), start=start
+            ):
                 rows.append(
                     DocumentChunk(
-                        filename=filename,
+                        document_id=document_id,
                         page=doc.get("page"),
                         section=doc.get("section"),
                         chunk_type=doc.get("type"),
+                        parent_id=doc.get("parent_id"),
+                        child_id=doc.get("child_id"),
+                        chunk_index=chunk_index,
                         text=doc["text"],
-                        chunk_metadata={
-                            **doc,
-                            "parent_id": doc.get("parent_id"),
-                            "child_id": doc.get("child_id"),
-                        },
+                        chunk_metadata=doc,
                         embedding=embedding.tolist(),
                     )
                 )
@@ -160,7 +158,6 @@ Content:
                 session.add_all(rows[i : i + INSERT_BATCH_SIZE])
 
             session.commit()
-
             inserted += len(rows)
 
             print(f"Inserted {inserted}/{total} chunks")
@@ -168,21 +165,30 @@ Content:
             del embeddings
             del rows
 
+        # update TSV for full-text search
         session.execute(
             text("""
                 UPDATE document_chunks
                 SET tsv = to_tsvector('simple', text)
-                WHERE filename = :filename
+                WHERE document_id = :document_id
             """),
-            {"filename": filename},
+            {"document_id": document_id},
         )
-
         session.commit()
+
+    # mark document as ready
+    with Session(engine) as session:
+        doc_row = session.get(Document, document_id)
+        if doc_row:
+            doc_row.status = "ready"
+            doc_row.chunk_count = inserted
+            doc_row.page_count = len(set(d.get("page") for d in documents))
+            session.add(doc_row)
+            session.commit()
 
     print("\n" + "=" * 80)
     print("VECTOR DATABASE READY (PARENT-CHILD)")
     print("=" * 80)
-
     print(f"Stored chunks: {inserted}")
 
 
@@ -192,12 +198,22 @@ Content:
 
 
 def list_ready_documents():
-
+    """Return all documents that have been fully indexed."""
     with Session(engine) as session:
+        rows = session.exec(select(Document).where(Document.status == "ready")).all()
 
-        rows = session.exec(select(DocumentChunk.filename).distinct()).all()
-
-        return sorted(rows)
+        return [
+            {
+                "document_id": doc.id,
+                "original_filename": doc.original_filename,
+                "stored_filename": doc.stored_filename,
+                "checksum": doc.checksum,
+                "page_count": doc.page_count,
+                "chunk_count": doc.chunk_count,
+                "created_at": doc.created_at.isoformat(),
+            }
+            for doc in rows
+        ]
 
 
 # =========================
@@ -206,38 +222,51 @@ def list_ready_documents():
 
 
 async def ask_document(
-    filenames: list[str],
-    question: str,
     session_id: str,
+    question: str,
     background_tasks: BackgroundTasks,
+    document_ids: list[str] | None = None,  # None = all docs in session
 ):
     print("\n" + "=" * 80)
     print("NEW QUESTION")
     print("=" * 80)
-
     print(
         {
-            "filenames": filenames,
-            "question": question,
             "session_id": session_id,
+            "question": question,
+            "document_ids_filter": document_ids,
         }
     )
+
+    # =========================
+    # RESOLVE DOCUMENT IDS
+    # =========================
+
+    if document_ids:
+        resolved_ids = document_ids
+    else:
+        with Session(engine) as db:
+            rows = db.exec(
+                select(SessionDocument.document_id).where(
+                    SessionDocument.session_id == session_id
+                )
+            ).all()
+            resolved_ids = list(rows)
+
+    if not resolved_ids:
+        return "No documents found for this session."
 
     # =========================
     # CACHE KEY
     # =========================
 
-    cache_key = "|".join(sorted(filenames))
+    cache_key = session_id + "|" + "|".join(sorted(resolved_ids))
 
     # =========================
     # EXACT CACHE
     # =========================
 
-    exact_cached = get_exact_cache(
-        cache_key,
-        question,
-    )
-
+    exact_cached = get_exact_cache(cache_key, question)
     if exact_cached:
         print("\nEXACT CACHE HIT")
         return exact_cached
@@ -247,27 +276,19 @@ async def ask_document(
     # =========================
 
     print("\nGenerating query embedding...")
-
-    query_embedding = await asyncio.to_thread(
-        create_embedding,
-        question,
-    )
+    query_embedding = await asyncio.to_thread(create_embedding, question)
 
     # =========================
     # SEMANTIC CACHE
     # =========================
 
-    semantic_cached = get_semantic_cache(
-        cache_key,
-        query_embedding,
-    )
-
+    semantic_cached = get_semantic_cache(cache_key, query_embedding)
     if semantic_cached:
         print("\nSEMANTIC CACHE HIT")
         return semantic_cached
 
     # =========================
-    # PARALLEL LOAD
+    # PARALLEL: MEMORY + SEARCH
     # =========================
 
     memory_task = asyncio.to_thread(
@@ -278,23 +299,15 @@ async def ask_document(
 
     document_task = asyncio.to_thread(
         hybrid_document_search_multiple,
-        filenames,
+        resolved_ids,
         question,
         query_embedding,
         TOP_K,
     )
 
-    (
-        memory_context,
-        results,
-    ) = await asyncio.gather(
-        memory_task,
-        document_task,
-    )
+    memory_context, results = await asyncio.gather(memory_task, document_task)
 
-    print(
-        "\n[document_loaded] Documents + BM25 indexes loaded"
-    )  # <-- was yield thinking(...)
+    print("\n[document_loaded] Documents searched")
 
     # =========================
     # SEARCH RESULTS
@@ -315,14 +328,13 @@ async def ask_document(
                 "rank": rank,
                 "score": score,
                 "page": doc.get("page"),
-                "file": doc.get("filename"),
+                "document_id": doc.get("document_id"),
+                "parent_id": doc.get("parent_id"),
             }
         )
 
         context += f"""
-
-[FILE: {doc.get('filename')}]
-
+[DOCUMENT ID: {doc.get('document_id')}]
 [PAGE: {doc.get('page')}]
 
 {doc.get('text')}
@@ -344,9 +356,7 @@ Use:
 
 Only answer when supported by context.
 
-If uncertain say:
-
-"I could not find that in the documents."
+If uncertain say: "I could not find that in the documents."
 
 ==================================================
 RELEVANT PAST CONVERSATIONS
@@ -380,12 +390,7 @@ QUESTION
     print("\nGenerating LLM response...")
 
     response = generate_response(
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0,
     )
 
@@ -397,26 +402,10 @@ QUESTION
     # BACKGROUND TASKS
     # =========================
 
+    background_tasks.add_task(set_exact_cache, cache_key, question, answer)
     background_tasks.add_task(
-        set_exact_cache,
-        cache_key,
-        question,
-        answer,
+        set_semantic_cache, cache_key, question, query_embedding, answer
     )
-
-    background_tasks.add_task(
-        set_semantic_cache,
-        cache_key,
-        question,
-        query_embedding,
-        answer,
-    )
-
-    background_tasks.add_task(
-        save_conversation_turn,
-        session_id,
-        question,
-        answer,
-    )
+    background_tasks.add_task(save_conversation_turn, session_id, question, answer)
 
     return answer

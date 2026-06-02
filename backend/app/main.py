@@ -12,6 +12,14 @@ from app.services.database import engine
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+# models must be imported before create_all so SQLModel registers them
+from app.models.conversation_memory import ConversationMemory
+from app.models.conversation_summary import ConversationSummary
+from app.models.document_chunk import DocumentChunk
+from app.models.session import Session
+from app.models.document import Document
+from app.models.session_document import SessionDocument
+
 app = FastAPI()
 
 app.state.limiter = limiter

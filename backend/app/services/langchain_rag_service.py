@@ -1,7 +1,7 @@
 import os
 import asyncio
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Optional
 from fastapi import HTTPException, BackgroundTasks
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.retrievers import BaseRetriever
@@ -9,7 +9,6 @@ from langchain_core.documents import Document
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from typing import List, Optional
 from langchain_groq import ChatGroq
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -18,6 +17,9 @@ from sqlmodel import Session, select
 from sqlalchemy import text
 
 from app.services.database import engine
+from app.models.document_chunk import DocumentChunk
+from app.models.session_document import SessionDocument
+from app.models.document import Document as DocumentModel
 from app.services.memory_service import (
     retrieve_relevant_memories,
     save_conversation_turn,
@@ -30,180 +32,28 @@ from app.services.semantic_cache_service import (
 )
 from app.services.vector_search_service import (
     create_embedding,
-    # load_index_and_metadata,
-    # semantic_search,
-    # build_bm25_index,
-    # save_bm25_index,
-    # load_bm25_index,
     hybrid_search,
+    hybrid_document_search_multiple,
 )
-from app.utils.file_utils import (
-    get_index_path,
-    get_metadata_path,
-    get_bm25_path,
-)
-
 from app.utils.helpers import format_sse, thinking, token_event, done_event
 from app.config.settings import TOP_K
 
-# ── shared instances ─────────────────────────────────────────────────────────
+# ── shared LLM instances ──────────────────────────────────────────────────────
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
     google_api_key=os.getenv("GEMINI_API_KEY"),
 )
+
 llmGroq = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0,
     api_key=os.getenv("GROQ_API_KEY"),
 )
 
-# ── retriever ────────────────────────────────────────────────────────────────
 
-
-# class FaissRetriever(BaseRetriever):
-
-#     indexes: list
-#     document_sets: list[list]
-
-#     query_embedding: object
-#     query: str = ""
-
-#     bm25_indexes: Optional[list] = None
-
-#     def _search_single_document(
-#         self,
-#         doc_idx: int,
-#     ):
-
-#         index = self.indexes[doc_idx]
-
-#         documents = self.document_sets[doc_idx]
-
-#         bm25_index = None
-
-#         if self.bm25_indexes and len(self.bm25_indexes) > doc_idx:
-#             bm25_index = self.bm25_indexes[doc_idx]
-
-#         print(
-#             {
-#                 "document_set": doc_idx,
-#                 "chunks": len(documents),
-#                 "bm25_enabled": bm25_index is not None,
-#             }
-#         )
-
-#         if bm25_index is not None:
-
-#             return hybrid_search(
-#                 faiss_index=index,
-#                 bm25_index=bm25_index,
-#                 metadata=documents,
-#                 query_embedding=self.query_embedding,
-#                 query=self.query,
-#                 top_k=TOP_K,
-#             )
-
-#         return semantic_search(
-#             index=index,
-#             metadata=documents,
-#             query_embedding=self.query_embedding,
-#             top_k=TOP_K,
-#         )
-
-#     def _get_relevant_documents(
-#         self,
-#         query: str,
-#         *,
-#         run_manager: CallbackManagerForRetrieverRun,
-#     ) -> List[Document]:
-
-#         print("\n" + "=" * 80)
-#         print("LANGCHAIN RETRIEVER")
-#         print("=" * 80)
-
-#         # =========================
-#         # PARALLEL SEARCH
-#         # =========================
-
-#         worker_count = min(
-#             len(self.indexes),
-#             8,
-#         )
-
-#         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-
-#             search_results = list(
-#                 executor.map(
-#                     self._search_single_document,
-#                     range(len(self.indexes)),
-#                 )
-#             )
-
-#         # =========================
-#         # MERGE
-#         # =========================
-
-#         all_results = []
-
-#         for result_set in search_results:
-#             all_results.extend(result_set)
-
-#         print(
-#             {
-#                 "documents_searched": len(self.indexes),
-#                 "total_candidates": len(all_results),
-#             }
-#         )
-
-#         # =========================
-#         # GLOBAL RERANK
-#         # =========================
-
-#         all_results.sort(
-#             key=lambda x: x["score"],
-#             reverse=True,
-#         )
-
-#         all_results = all_results[:TOP_K]
-
-#         print(
-#             {
-#                 "final_results": len(all_results),
-#             }
-#         )
-
-#         # =========================
-#         # DEBUG
-#         # =========================
-
-#         for rank, result in enumerate(all_results, start=1):
-
-#             print(
-#                 {
-#                     "rank": rank,
-#                     "score": result["score"],
-#                     "page": result["data"].get("page"),
-#                     "source_file": result["data"].get("source_file"),
-#                 }
-#             )
-
-#         # =========================
-#         # LANGCHAIN DOCUMENTS
-#         # =========================
-
-#         return [
-#             Document(
-#                 page_content=result["data"]["text"],
-#                 metadata={
-#                     "page": result["data"].get("page"),
-#                     "source_file": result["data"].get("source_file"),
-#                     "score": result["score"],
-#                 },
-#             )
-#             for result in all_results
-#         ]
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 
 def log_step(step: str, data=None):
@@ -212,14 +62,27 @@ def log_step(step: str, data=None):
         print(data)
 
 
+def _resolve_document_ids(session_id: str) -> list[str]:
+    """Resolve all document_ids linked to a session via SessionDocument."""
+    with Session(engine) as db:
+        rows = db.exec(
+            select(SessionDocument.document_id).where(
+                SessionDocument.session_id == session_id
+            )
+        ).all()
+    return list(rows)
+
+
+# ── retriever ─────────────────────────────────────────────────────────────────
+
+
 class PostgresRetriever(BaseRetriever):
 
-    filenames: list[str]
+    session_id: str
     query_embedding: object
     query: str = ""
-
-    # optional debug trace collector
     trace: list = []
+    document_ids_filter: list[str] | None = None  # if set, skip session resolution
 
     def _log(self, step: str, data=None):
         msg = {"step": step, "data": data, "ts": time.time()}
@@ -228,24 +91,22 @@ class PostgresRetriever(BaseRetriever):
         if data:
             print(data)
 
-    def _search_single_document(self, filename: str):
-
-        self._log("search.single_document.start", {"filename": filename})
+    def _search_single_document(self, document_id: str):
+        self._log("search.single_document.start", {"document_id": document_id})
 
         with Session(engine) as session:
-
             results = hybrid_search(
                 session=session,
                 query=self.query,
                 query_embedding=self.query_embedding,
-                filename=filename,
+                document_id=document_id,
                 top_k=TOP_K,
             )
 
         self._log(
             "search.single_document.done",
             {
-                "filename": filename,
+                "document_id": document_id,
                 "results": len(results),
             },
         )
@@ -261,77 +122,53 @@ class PostgresRetriever(BaseRetriever):
 
         start = time.time()
 
-        # =====================================================
-        # START
-        # =====================================================
         self._log("retriever.start")
         self._log("retriever.query_received", query)
-        self._log("retriever.documents", self.filenames)
+        self._log("retriever.session_id", self.session_id)
 
         self.query = query
 
-        # =====================================================
-        # SEARCH ALL FILES IN PARALLEL
-        # =====================================================
-        self._log(
-            "retriever.searching_documents",
-            {"count": len(self.filenames)},
-        )
-
-        worker_count = min(len(self.filenames), 8)
-
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-
-            search_results = list(
-                executor.map(
-                    self._search_single_document,
-                    self.filenames,
-                )
-            )
-
-        # =====================================================
-        # RAW RESULTS DEBUG
-        # =====================================================
-        self._log("retriever.raw_results_collected")
-
-        for filename, result_set in zip(self.filenames, search_results):
-
+        # use explicit filter if provided, otherwise resolve from session
+        if self.document_ids_filter:
+            document_ids = self.document_ids_filter
             self._log(
-                "retriever.file_results",
+                "retriever.document_ids_from_filter",
                 {
-                    "filename": filename,
-                    "count": len(result_set),
+                    "document_ids": document_ids,
+                },
+            )
+        else:
+            document_ids = _resolve_document_ids(self.session_id)
+            self._log(
+                "retriever.document_ids_resolved",
+                {
+                    "session_id": self.session_id,
+                    "document_ids": document_ids,
                 },
             )
 
-        # =====================================================
-        # MERGE
-        # =====================================================
-        all_results = []
+        if not document_ids:
+            self._log("retriever.no_documents")
+            return []
 
+        self._log("retriever.searching_documents", {"count": len(document_ids)})
+
+        worker_count = min(len(document_ids), 8)
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            search_results = list(
+                executor.map(self._search_single_document, document_ids)
+            )
+
+        all_results = []
         for result_set in search_results:
             all_results.extend(result_set)
 
-        self._log(
-            "retriever.candidates",
-            {"total": len(all_results)},
-        )
-
-        # =====================================================
-        # RANKING STEP (THIS IS YOUR "THINKING")
-        # =====================================================
-        self._log(
-            "retriever.ranking",
-            {"top_k": TOP_K},
-        )
+        self._log("retriever.candidates", {"total": len(all_results)})
 
         all_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
-
         top_results = all_results[:TOP_K]
 
-        # =====================================================
-        # FINAL OUTPUT TRACE
-        # =====================================================
         self._log(
             "retriever.final_chunks",
             {
@@ -341,26 +178,25 @@ class PostgresRetriever(BaseRetriever):
         )
 
         for i, r in enumerate(top_results, 1):
-
             self._log(
                 "retriever.chunk",
                 {
                     "rank": i,
                     "page": r.get("page"),
-                    "file": r.get("filename"),
+                    "document_id": r.get("document_id"),
+                    "parent_id": r.get("parent_id"),
                     "score": r["hybrid_score"],
                 },
             )
 
-        # =====================================================
-        # RETURN LANGCHAIN DOCUMENTS
-        # =====================================================
         return [
             Document(
                 page_content=r["text"],
                 metadata={
                     "page": r.get("page"),
-                    "source_file": r.get("filename"),
+                    "document_id": r.get("document_id"),
+                    "parent_id": r.get("parent_id"),
+                    "child_id": r.get("child_id"),
                     "score": r["hybrid_score"],
                 },
             )
@@ -368,7 +204,7 @@ class PostgresRetriever(BaseRetriever):
         ]
 
 
-# ── service ──────────────────────────────────────────────────────────────────
+# ── streaming helpers ─────────────────────────────────────────────────────────
 
 
 class _ListStream:
@@ -409,11 +245,9 @@ class _LLMStream:
         return self
 
     async def __anext__(self) -> str:
-        # Drain thinking queue first
         if not self._thinking_queue.empty():
             return self._thinking_queue.get_nowait()
 
-        # Initialize chain iterator once
         if self._chain_iter is None:
             chain = (
                 {"context": self._retriever, "question": lambda x: x}
@@ -425,37 +259,38 @@ class _LLMStream:
         if self._done:
             raise StopAsyncIteration
 
-        # Get next chunk
         try:
             chunk = await self._chain_iter.__anext__()
-            # Drain thinking queue between chunks
             if not self._thinking_queue.empty():
                 return self._thinking_queue.get_nowait()
             token = chunk.content if hasattr(chunk, "content") else str(chunk)
             if token:
                 self._full_answer += token
                 return token_event(token)
-            return ""  # empty chunk, caller will just get empty string
+            return ""
         except StopAsyncIteration:
             self._done = True
             self._schedule_saves(self._full_answer)
             return done_event()
 
 
+# ── service ───────────────────────────────────────────────────────────────────
+
+
 async def ask_document_langchain(
-    filenames: list[str],
-    question: str,
     session_id: str,
+    question: str,
     background_tasks: BackgroundTasks,
     stream: bool = False,
+    document_ids: list[str] | None = None,  # optional subset filter
 ) -> str | AsyncGenerator[str, None]:
 
     print("\n" + "=" * 80)
     print("LANGCHAIN ASK")
     print("=" * 80)
-    print({"filenames": filenames, "question": question, "session_id": session_id})
+    print({"session_id": session_id, "question": question})
 
-    cache_key = "|".join(sorted(filenames))
+    cache_key = session_id
     thinking_queue: asyncio.Queue = asyncio.Queue()
 
     def think(event: str, message: str, data: dict = None):
@@ -472,7 +307,6 @@ async def ask_document_langchain(
     # EXACT CACHE
     # =========================
     exact_cached = get_exact_cache(cache_key, question)
-
     if exact_cached:
         print("\nEXACT CACHE HIT")
         if stream:
@@ -488,7 +322,6 @@ async def ask_document_langchain(
     # QUERY EMBEDDING
     # =========================
     think("embedding", "Creating query embedding", {"model": "sentence-transformers"})
-    print("\nGenerating query embedding...")
     query_embedding = await asyncio.to_thread(create_embedding, question)
     think("embedding_done", "Query embedding created")
 
@@ -497,7 +330,6 @@ async def ask_document_langchain(
     # =========================
     think("cache", "Checking semantic cache")
     semantic_cached = get_semantic_cache(cache_key, query_embedding)
-
     if semantic_cached:
         print("\nSEMANTIC CACHE HIT")
         if stream:
@@ -512,14 +344,13 @@ async def ask_document_langchain(
     think(
         "cache_miss",
         "Cache miss — starting retrieval pipeline",
-        {"filenames": filenames},
+        {"session_id": session_id},
     )
 
     # =========================
     # MEMORY
     # =========================
     think("memory_search", "Searching conversation memory", {"session_id": session_id})
-    print("\nLoading memory context...")
     memory_context = await asyncio.to_thread(
         retrieve_relevant_memories, session_id, question
     )
@@ -530,9 +361,10 @@ async def ask_document_langchain(
     # =========================
     think("retrieval", "Running hybrid retrieval (vector + BM25)")
     retriever = PostgresRetriever(
-        filenames=filenames,
+        session_id=session_id,
         query_embedding=query_embedding,
         query=question,
+        document_ids_filter=document_ids,  # None = search all session docs
     )
 
     # =========================

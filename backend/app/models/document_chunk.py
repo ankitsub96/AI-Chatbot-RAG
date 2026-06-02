@@ -1,3 +1,4 @@
+import uuid
 from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 from pgvector.sqlalchemy import Vector
@@ -7,12 +8,23 @@ from sqlalchemy.dialects.postgresql import TSVECTOR
 class DocumentChunk(SQLModel, table=True):
     __tablename__ = "document_chunks"
 
-    id: int | None = Field(default=None, primary_key=True)
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
 
-    filename: str
+    document_id: str = Field(foreign_key="documents.id", index=True)
+
     page: int | None = None
     section: str | None = None
     chunk_type: str | None = None
+
+    # hierarchy
+    parent_id: str | None = Field(default=None, index=True)
+    child_id: str | None = Field(default=None, index=True)
+    chunk_index: int | None = (
+        None  # position within parent, useful for sibling retrieval
+    )
 
     text: str
 
