@@ -367,3 +367,133 @@ def _keyword_document_search(
         }
         for row, rank_score in rows
     ]
+
+
+# =====================================================
+# PARENT-AWARE RETRIEVAL (Phase 5)
+# =====================================================
+
+
+def group_chunks_by_parent(results: list[dict]) -> dict[str, dict]:
+    """
+    Group child chunk results by parent_id.
+
+    Returns:
+        {
+            parent_id: {
+                "parent_id": str,
+                "score": float,          # max child score (Step 5.3)
+                "chunks": [chunk_dict]   # all matched children
+            }
+        }
+    """
+    grouped = defaultdict(lambda: {"score": 0.0, "chunks": []})
+
+    for result in results:
+        data = result.get("data", result)
+        parent_id = data.get("parent_id")
+
+        if not parent_id:
+            # chunk has no parent — treat itself as a standalone group
+            parent_id = f"standalone_{data.get('id')}"
+
+        score = result.get("score", result.get("hybrid_score", 0.0))
+
+        # parent score = max child score (Step 5.3)
+        if score > grouped[parent_id]["score"]:
+            grouped[parent_id]["score"] = score
+
+        grouped[parent_id]["parent_id"] = parent_id
+        grouped[parent_id]["chunks"].append(data)
+
+    return dict(grouped)
+
+
+def select_top_parents(
+    grouped: dict[str, dict],
+    top_n: int,
+) -> list[dict]:
+    """
+    Select top N parents ranked by their max child score (Step 5.4).
+    """
+    ranked = sorted(
+        grouped.values(),
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+    return ranked[:top_n]
+
+
+def expand_parent_chunks(
+    *,
+    session: Session,
+    parent_ids: list[str],
+    document_id: str | None = None,
+) -> dict[str, list[dict]]:
+    """
+    For each selected parent_id, retrieve ALL its children from DB (Step 5.5).
+    Returns them sorted by chunk_index for coherent reading order.
+
+    This is context expansion — we searched with children,
+    but answer using the full parent window.
+    """
+    stmt = select(DocumentChunk).where(DocumentChunk.parent_id.in_(parent_ids))
+
+    if document_id:
+        stmt = stmt.where(DocumentChunk.document_id == document_id)
+
+    # sort by chunk_index so siblings are in reading order
+    stmt = stmt.order_by(DocumentChunk.chunk_index)
+
+    rows = session.exec(stmt).all()
+
+    expanded: dict[str, list[dict]] = defaultdict(list)
+
+    for row in rows:
+        expanded[row.parent_id].append(_chunk_to_dict(row))
+
+    return dict(expanded)
+
+
+def build_parent_context_blocks(
+    top_parents: list[dict],
+    expanded: dict[str, list[dict]],
+) -> str:
+    """
+    Build structured context string for LLM (Step 5.6).
+
+    Produces:
+
+        [PARENT: parent_0_page_1]
+        [PAGE: 1] [SCORE: 0.0123]
+
+          chunk text 1...
+
+          chunk text 2...
+
+        [PARENT: parent_1_page_3]
+        ...
+    """
+    blocks = []
+
+    for parent in top_parents:
+        parent_id = parent["parent_id"]
+        children = expanded.get(parent_id, parent["chunks"])
+
+        # sort children by chunk_index if available
+        children = sorted(
+            children,
+            key=lambda c: c.get("chunk_index") or 0,
+        )
+
+        page = children[0].get("page", "?") if children else "?"
+
+        header = (
+            f"[PARENT: {parent_id}]\n" f"[PAGE: {page}] [SCORE: {parent['score']:.6f}]"
+        )
+
+        body = "\n\n".join(f"  {child['text']}" for child in children)
+
+        blocks.append(f"{header}\n\n{body}")
+
+    return "\n\n" + ("\n\n" + "─" * 60 + "\n\n").join(blocks) + "\n\n"

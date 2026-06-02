@@ -34,6 +34,9 @@ from app.services.vector_search_service import (
     create_embedding,
     hybrid_search,
     hybrid_document_search_multiple,
+    group_chunks_by_parent,
+    select_top_parents,
+    expand_parent_chunks,
 )
 from app.utils.helpers import format_sse, thinking, token_event, done_event
 from app.config.settings import TOP_K
@@ -128,14 +131,11 @@ class PostgresRetriever(BaseRetriever):
 
         self.query = query
 
-        # use explicit filter if provided, otherwise resolve from session
+        # resolve document_ids
         if self.document_ids_filter:
             document_ids = self.document_ids_filter
             self._log(
-                "retriever.document_ids_from_filter",
-                {
-                    "document_ids": document_ids,
-                },
+                "retriever.document_ids_from_filter", {"document_ids": document_ids}
             )
         else:
             document_ids = _resolve_document_ids(self.session_id)
@@ -151,6 +151,7 @@ class PostgresRetriever(BaseRetriever):
             self._log("retriever.no_documents")
             return []
 
+        # search children in parallel
         self._log("retriever.searching_documents", {"count": len(document_ids)})
 
         worker_count = min(len(document_ids), 8)
@@ -166,42 +167,72 @@ class PostgresRetriever(BaseRetriever):
 
         self._log("retriever.candidates", {"total": len(all_results)})
 
-        all_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
-        top_results = all_results[:TOP_K]
+        # =========================
+        # PARENT GROUPING + SELECTION
+        # =========================
+
+        grouped = group_chunks_by_parent(all_results)
+        top_parents = select_top_parents(grouped, top_n=TOP_K)
 
         self._log(
-            "retriever.final_chunks",
+            "retriever.parents_selected",
             {
-                "returned": len(top_results),
+                "total_parents": len(grouped),
+                "top_parents": len(top_parents),
+            },
+        )
+
+        # =========================
+        # CONTEXT EXPANSION
+        # =========================
+
+        parent_ids = [p["parent_id"] for p in top_parents]
+
+        with Session(engine) as db:
+            expanded = expand_parent_chunks(
+                session=db,
+                parent_ids=parent_ids,
+            )
+
+        self._log(
+            "retriever.expanded",
+            {
+                "parents_expanded": len(expanded),
                 "execution_time_sec": round(time.time() - start, 3),
             },
         )
 
-        for i, r in enumerate(top_results, 1):
-            self._log(
-                "retriever.chunk",
-                {
-                    "rank": i,
-                    "page": r.get("page"),
-                    "document_id": r.get("document_id"),
-                    "parent_id": r.get("parent_id"),
-                    "score": r["hybrid_score"],
-                },
+        # =========================
+        # RETURN LANGCHAIN DOCUMENTS
+        # one Document per parent — full expanded context as page_content
+        # =========================
+
+        documents = []
+
+        for parent in top_parents:
+            parent_id = parent["parent_id"]
+            children = expanded.get(parent_id, parent["chunks"])
+            children = sorted(children, key=lambda c: c.get("chunk_index") or 0)
+
+            page = children[0].get("page", "?") if children else "?"
+            full_text = "\n\n".join(child["text"] for child in children)
+
+            documents.append(
+                Document(
+                    page_content=full_text,
+                    metadata={
+                        "parent_id": parent_id,
+                        "page": page,
+                        "document_id": (
+                            children[0].get("document_id") if children else None
+                        ),
+                        "score": parent["score"],
+                        "child_count": len(children),
+                    },
+                )
             )
 
-        return [
-            Document(
-                page_content=r["text"],
-                metadata={
-                    "page": r.get("page"),
-                    "document_id": r.get("document_id"),
-                    "parent_id": r.get("parent_id"),
-                    "child_id": r.get("child_id"),
-                    "score": r["hybrid_score"],
-                },
-            )
-            for r in top_results
-        ]
+        return documents
 
 
 # ── streaming helpers ─────────────────────────────────────────────────────────
@@ -377,7 +408,7 @@ async def ask_document_langchain(
     )
 
     prompt = PromptTemplate(
-        input_variables=["context", "question"],
+        input_variables=["context", "safe_memory_context", "question"],
         template=f"""
 You are a helpful document assistant.
 
@@ -393,6 +424,11 @@ RELEVANT PAST CONVERSATIONS
 
 {safe_memory_context}
 
+==================================================
+RETRIEVED DOCUMENTS
+==================================================
+
+{{context}}
 ==================================================
 QUESTION
 ==================================================
@@ -426,7 +462,10 @@ QUESTION
         llm=llmGroq,
         retriever=retriever,
         chain_type="stuff",
-        chain_type_kwargs={"prompt": prompt, "document_variable_name": "context"},
+        chain_type_kwargs={
+            "prompt": prompt,
+            "document_variable_name": "context",
+        },
         output_key="result",
     )
 

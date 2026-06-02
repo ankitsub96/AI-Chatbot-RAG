@@ -8,6 +8,11 @@ from app.services.rag_service import (
     build_vector_database,
     list_ready_documents,
     ask_document,
+    create_session,
+    get_session_documents,
+    unlink_session_document,
+    delete_session_full,
+    cleanup_orphan_documents,
 )
 from app.services.langchain_rag_service import ask_document_langchain
 from app.models.rag_model import AskDocumentRequest
@@ -211,12 +216,34 @@ async def session_history(session_id: str, page: int = 1, page_size: int = 20):
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
-    delete_session_memory(session_id)
-    return {"message": "Session deleted"}
+async def delete_session(session_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(delete_session_full, session_id)
+    return {"message": "Session deletion started."}
 
 
 @router.post("/sessions/{session_id}/search")
 async def search_session_memory(session_id: str, payload: SearchMemoryRequest):
     results = semantic_search_session(session_id, payload.query)
     return {"results": results}
+
+
+@router.post("/sessions")
+async def create_new_session(title: str | None = None):
+    return create_session(title=title)
+
+
+@router.get("/sessions/{session_id}/documents")
+async def session_documents(session_id: str):
+    return {"documents": get_session_documents(session_id)}
+
+
+@router.delete("/sessions/{session_id}/documents/{document_id}")
+async def remove_document_from_session(session_id: str, document_id: str):
+    return unlink_session_document(session_id, document_id)
+
+
+@router.post("/admin/cleanup")
+async def trigger_orphan_cleanup(background_tasks: BackgroundTasks):
+    """Manual trigger for orphan cleanup — useful for admin/maintenance."""
+    background_tasks.add_task(cleanup_orphan_documents)
+    return {"message": "Orphan cleanup started."}

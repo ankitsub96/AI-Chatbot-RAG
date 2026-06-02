@@ -37,6 +37,10 @@ from app.services.vector_search_service import (
     # save_faiss_index,
     # load_faiss_index,
     hybrid_document_search_multiple,
+    group_chunks_by_parent,
+    select_top_parents,
+    expand_parent_chunks,
+    build_parent_context_blocks,
 )
 from app.services.pdf_service import (
     group_pages,
@@ -57,6 +61,9 @@ from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
 from app.models.document import Document
 from app.models.session_document import SessionDocument
+from app.models.conversation_memory import ConversationMemory
+from app.models.conversation_summary import ConversationSummary
+from app.models.session import Session as SessionModel
 
 # =========================
 # EMBEDDING CONFIG
@@ -73,7 +80,6 @@ INSERT_BATCH_SIZE = 50
 # =========================
 
 
-@timer
 @timer
 async def build_vector_database(document_id: str, stored_filename: str):
     pdf_path = UPLOAD_DIR / stored_filename
@@ -225,7 +231,7 @@ async def ask_document(
     session_id: str,
     question: str,
     background_tasks: BackgroundTasks,
-    document_ids: list[str] | None = None,  # None = all docs in session
+    document_ids: list[str] | None = None,
 ):
     print("\n" + "=" * 80)
     print("NEW QUESTION")
@@ -288,7 +294,7 @@ async def ask_document(
         return semantic_cached
 
     # =========================
-    # PARALLEL: MEMORY + SEARCH
+    # PARALLEL: MEMORY + CHILD SEARCH
     # =========================
 
     memory_task = asyncio.to_thread(
@@ -305,41 +311,59 @@ async def ask_document(
         TOP_K,
     )
 
-    memory_context, results = await asyncio.gather(memory_task, document_task)
+    memory_context, child_results = await asyncio.gather(memory_task, document_task)
 
-    print("\n[document_loaded] Documents searched")
+    print("\n[search_done] Child chunks retrieved")
 
     # =========================
-    # SEARCH RESULTS
+    # PARENT GROUPING (Step 5.2)
     # =========================
 
     print("\n" + "=" * 80)
-    print("SEARCH RESULTS")
+    print("PARENT-AWARE RETRIEVAL")
     print("=" * 80)
 
-    context = ""
+    grouped = group_chunks_by_parent(child_results)
 
-    for rank, result in enumerate(results, start=1):
-        score = result["score"]
-        doc = result["data"]
+    print(f"Unique parents matched: {len(grouped)}")
 
+    # =========================
+    # TOP PARENT SELECTION (Step 5.4)
+    # =========================
+
+    top_parents = select_top_parents(grouped, top_n=TOP_K)
+
+    print(f"Top parents selected: {len(top_parents)}")
+
+    for rank, p in enumerate(top_parents, 1):
         print(
             {
                 "rank": rank,
-                "score": score,
-                "page": doc.get("page"),
-                "document_id": doc.get("document_id"),
-                "parent_id": doc.get("parent_id"),
+                "parent_id": p["parent_id"],
+                "score": p["score"],
+                "matched_children": len(p["chunks"]),
             }
         )
 
-        context += f"""
-[DOCUMENT ID: {doc.get('document_id')}]
-[PAGE: {doc.get('page')}]
+    # =========================
+    # CONTEXT EXPANSION (Step 5.5)
+    # =========================
 
-{doc.get('text')}
+    parent_ids = [p["parent_id"] for p in top_parents]
 
-"""
+    with Session(engine) as db:
+        expanded = expand_parent_chunks(
+            session=db,
+            parent_ids=parent_ids,
+        )
+
+    print(f"Expanded parents: {len(expanded)}")
+
+    # =========================
+    # BUILD CONTEXT BLOCKS (Step 5.6)
+    # =========================
+
+    context = build_parent_context_blocks(top_parents, expanded)
 
     # =========================
     # PROMPT
@@ -409,3 +433,146 @@ QUESTION
     background_tasks.add_task(save_conversation_turn, session_id, question, answer)
 
     return answer
+
+
+def create_session(title: str | None = None) -> dict:
+
+    with Session(engine) as db:
+        s = SessionModel(title=title)
+        db.add(s)
+        db.commit()
+        db.refresh(s)
+        return {
+            "session_id": s.id,
+            "title": s.title,
+            "created_at": s.created_at.isoformat(),
+        }
+
+
+def get_session_documents(session_id: str) -> list[dict]:
+    with Session(engine) as db:
+        rows = db.exec(
+            select(SessionDocument, Document)
+            .join(Document, SessionDocument.document_id == Document.id)
+            .where(SessionDocument.session_id == session_id)
+        ).all()
+
+        return [
+            {
+                "document_id": doc.id,
+                "original_filename": doc.original_filename,
+                "stored_filename": doc.stored_filename,
+                "checksum": doc.checksum,
+                "status": doc.status,
+                "page_count": doc.page_count,
+                "chunk_count": doc.chunk_count,
+                "linked_at": sd.created_at.isoformat(),
+            }
+            for sd, doc in rows
+        ]
+
+
+def unlink_session_document(session_id: str, document_id: str) -> dict:
+    """
+    Remove the session↔document mapping only.
+    Never deletes the Document or its chunks — those are shared.
+    """
+    with Session(engine) as db:
+        row = db.exec(
+            select(SessionDocument).where(
+                SessionDocument.session_id == session_id,
+                SessionDocument.document_id == document_id,
+            )
+        ).first()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not linked to this session.",
+            )
+
+        db.delete(row)
+        db.commit()
+
+    return {"message": "Document unlinked from session."}
+
+
+def cleanup_orphan_documents() -> dict:
+    """
+    Delete Documents with no SessionDocument references,
+    along with their chunks.
+    Designed to run as a background task or scheduled job.
+    """
+    with Session(engine) as db:
+        # find document_ids that have no session mapping
+        linked_ids = db.exec(select(SessionDocument.document_id).distinct()).all()
+
+        linked_set = set(linked_ids)
+
+        all_docs = db.exec(select(Document)).all()
+
+        orphans = [doc for doc in all_docs if doc.id not in linked_set]
+
+        if not orphans:
+            print("No orphan documents found.")
+            return {"deleted": 0}
+
+        deleted_count = 0
+
+        for doc in orphans:
+            print(f"Deleting orphan document: {doc.id} ({doc.original_filename})")
+
+            # delete chunks first (no cascade set at DB level)
+            db.execute(
+                text("DELETE FROM document_chunks WHERE document_id = :doc_id"),
+                {"doc_id": doc.id},
+            )
+
+            # delete stored file if it exists
+            file_path = UPLOAD_DIR / doc.stored_filename
+            if file_path.exists():
+                file_path.unlink()
+                print(f"Deleted file: {file_path}")
+
+            db.delete(doc)
+            deleted_count += 1
+
+        db.commit()
+
+        print(f"Orphan cleanup complete. Deleted: {deleted_count}")
+        return {"deleted": deleted_count}
+
+
+def delete_session_full(session_id: str) -> dict:
+    from app.models.conversation_memory import ConversationMemory
+    from app.models.conversation_summary import ConversationSummary
+    from app.models.session import Session as SessionModel
+
+    with Session(engine) as db:
+        db.execute(
+            text("DELETE FROM session_documents WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+
+        db.execute(
+            text("DELETE FROM conversation_memories WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+
+        db.execute(
+            text("DELETE FROM conversation_summaries WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+
+        session_row = db.get(SessionModel, session_id)
+        if session_row:
+            db.delete(session_row)
+
+        db.commit()
+
+    result = cleanup_orphan_documents()
+
+    return {
+        "message": "Session deleted.",
+        "orphans_cleaned": result["deleted"],
+    }
