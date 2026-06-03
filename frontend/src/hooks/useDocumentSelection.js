@@ -1,51 +1,42 @@
-import { useState, useEffect } from 'react'
-import { getDocuments } from '../api/ragApi'
-
-const STORAGE_KEY = 'rag_session_docs'
-
-function getStoredDocs(sessionId) {
-  try {
-    const map = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    return map[sessionId] || null
-  } catch { return null }
-}
-
-function storeDocs(sessionId, filenames) {
-  try {
-    const map = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    map[sessionId] = filenames
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
-  } catch {}
-}
+import { useState, useEffect, useCallback } from 'react'
+import { getSessionDocuments } from '../api/ragApi'
 
 export function useDocumentSelection(sessionId) {
-  const [documents, setDocuments] = useState([])
-  const [filenames, setFilenamesState] = useState([])
+  const [documents, setDocuments] = useState([])   // full doc objects from API
+  const [selectedIds, setSelectedIds] = useState([]) // document_id strings
+  const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    getDocuments().then(docs => {
+  const refresh = useCallback(async () => {
+    if (!sessionId) { setDocuments([]); setSelectedIds([]); return }
+    setLoading(true)
+    try {
+      const docs = await getSessionDocuments(sessionId)
       setDocuments(docs)
-      if (!docs.length) return
-
-      const stored = sessionId ? getStoredDocs(sessionId) : null
-      const valid = stored?.filter(f => docs.includes(f))
-      const initial = (valid?.length) ? valid : [docs[0]]
-      setFilenamesState(initial)
-    }).catch(() => {})
+      // auto-select all ready docs on first load
+      const readyIds = docs.filter(d => d.status === 'ready').map(d => d.document_id)
+      setSelectedIds(readyIds)
+    } catch {
+      setDocuments([])
+      setSelectedIds([])
+    } finally {
+      setLoading(false)
+    }
   }, [sessionId])
 
-  const setFilenames = (names) => {
-    setFilenamesState(names)
-    if (sessionId) storeDocs(sessionId, names)
-  }
+  useEffect(() => { refresh() }, [refresh])
 
-  const toggleFile = (name) => {
-    const updated = filenames.includes(name)
-      ? filenames.filter(f => f !== name)
-      : [...filenames, name]
-    const final = updated.length ? updated : [name] // always keep at least one
-    setFilenames(final)
-  }
+  const toggleDocument = useCallback((documentId) => {
+    setSelectedIds(prev => {
+      const next = prev.includes(documentId)
+        ? prev.filter(id => id !== documentId)
+        : [...prev, documentId]
+      return next.length ? next : prev // always keep at least one selected
+    })
+  }, [])
 
-  return { documents, filenames, setFilenames, toggleFile }
+  const selectAll = useCallback(() => {
+    setSelectedIds(documents.filter(d => d.status === 'ready').map(d => d.document_id))
+  }, [documents])
+
+  return { documents, selectedIds, toggleDocument, selectAll, refresh, loading }
 }

@@ -5,29 +5,36 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: $bg;
+  background: var(--bg);
+  transition: background 0.3s;
 
   &--empty {
     align-items: center;
     justify-content: center;
-    gap: 10px;
+    gap: 12px;
 
-    .chat-window__empty-icon {
-      font-size: 36px;
-      opacity: 0.2;
-    }
-
-    .chat-window__empty-text {
-      color: $text-muted;
+    p {
+      color: var(--text-muted);
       font-size: 14px;
       text-align: center;
-      line-height: 1.6;
-      max-width: 260px;
+      line-height: 1.7;
+      max-width: 240px;
+      font-weight: 400;
     }
 
-    .chat-window__empty-hint {
+    .empty-glyph {
+      font-size: 40px;
+      opacity: 0.12;
+      line-height: 1;
+    }
+
+    .empty-hint {
       font-size: 12px;
-      color: $text-dim;
+      color: var(--text-dim);
+      font-family: $font-mono;
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: $radius-sm;
     }
   }
 
@@ -35,144 +42,167 @@
     display: flex;
     align-items: center;
     padding: 0 20px;
-    height: 52px;
-    border-bottom: 1px solid $border;
-    background: $bg2;
-    gap: 12px;
+    height: 54px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    gap: 10px;
     flex-shrink: 0;
+    transition: background 0.3s, border-color 0.3s;
   }
 
-  &__doc-label {
-    font-size: 12px;
-    color: $text-dim;
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  &__doc-select {
-    background: $bg3;
-    border: 1px solid $border;
-    border-radius: $radius-sm;
-    padding: 5px 10px;
-    font-size: 12px;
-    color: $text-muted;
-    max-width: 320px;
-    cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
-
-    &:focus {
-      outline: none;
-      border-color: $accent;
-      color: $text;
-    }
-
-    option {
-      background: $bg3;
-    }
-  }
-
-  &__meta {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-left: auto;
-  }
-
-  &__session {
-    font-size: 12px;
-    color: $text-dim;
-    font-family: $font-mono;
-    background: $bg3;
-    padding: 3px 8px;
-    border-radius: $radius-sm;
-    border: 1px solid $border;
-  }
-
-  &__status {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    color: $text-dim;
-    font-weight: 500;
-
-    &::before {
-      content: '';
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: $green;
-      box-shadow: 0 0 6px $green;
-    }
-  }
-
-  &__doc-multi {
+  // document picker
+  &__doc-picker {
     position: relative;
+    flex-shrink: 0;
+  }
+
+  &__doc-trigger {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  &__doc-label {
-    font-size: 12px;
-    color: $text-muted;
-    font-weight: 500;
+    align-items: center;
+    gap: 6px;
     padding: 5px 10px;
-    background: $bg3;
-    border: 1px solid $border;
+    background: var(--bg3);
+    border: 1px solid var(--border);
     border-radius: $radius-sm;
-    cursor: default;
-    user-select: none;
-    min-width: 120px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: $font-ui;
+
+    svg { width: 12px; height: 12px; stroke: currentColor; fill: none; flex-shrink: 0; }
+
+    &:hover, &.open {
+      border-color: var(--accent);
+      color: var(--text);
+      background: var(--accent-soft);
+    }
   }
 
-  &__doc-list {
+  &__doc-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 99px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  &__doc-dropdown {
     position: absolute;
-    top: calc(100% + 4px);
+    top: calc(100% + 6px);
     left: 0;
-    z-index: 100;
-    background: $bg2;
-    border: 1px solid $border2;
+    z-index: 200;
+    background: var(--bg2);
+    border: 1px solid var(--border2);
     border-radius: $radius;
-    padding: 4px;
-    min-width: 280px;
-    max-width: 420px;
-    max-height: 220px;
+    min-width: 300px;
+    max-width: 440px;
+    max-height: 280px;
     overflow-y: auto;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow);
+    animation: dropdown-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+
+    &-header {
+      padding: 10px 14px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+
+    &-empty {
+      padding: 20px 14px;
+      font-size: 12px;
+      color: var(--text-dim);
+      text-align: center;
+    }
   }
 
   &__doc-item {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 7px 10px;
-    border-radius: $radius-sm;
+    gap: 10px;
+    padding: 9px 14px;
     cursor: pointer;
-    font-size: 12px;
-    color: $text-muted;
     transition: background 0.1s;
+    border-bottom: 1px solid var(--border);
+
+    &:last-child { border-bottom: none; }
+
+    &:hover { background: var(--bg3); }
+
+    &.selected { background: var(--accent-soft); }
 
     input[type='checkbox'] {
-      accent-color: $accent;
+      accent-color: var(--accent);
       cursor: pointer;
       flex-shrink: 0;
+      width: 14px;
+      height: 14px;
     }
 
-    span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    span { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+    &.selected span { color: var(--text); }
+  }
+
+  &__doc-status {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-family: $font-mono;
+    padding: 2px 6px;
+    border-radius: $radius-xs;
+    font-weight: 500;
+
+    &--ready {
+      background: rgba(52, 211, 153, 0.12);
+      color: var(--green);
     }
 
-    &:hover {
-      background: $bg3;
-      color: $text;
-    }
-
-    &.selected {
-      color: $text;
-      background: $accent-soft;
+    &--processing {
+      background: rgba(251, 191, 36, 0.12);
+      color: var(--yellow);
+      animation: status-pulse 1.5s ease-in-out infinite;
     }
   }
+
+  &__header-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  &__session-tag {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: $font-mono;
+    background: var(--bg3);
+    padding: 3px 8px;
+    border-radius: $radius-sm;
+    border: 1px solid var(--border);
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@keyframes dropdown-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
 }

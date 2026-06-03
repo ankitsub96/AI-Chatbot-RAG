@@ -20,6 +20,7 @@ from app.models.conversation_memory import ConversationMemory
 from app.models.conversation_summary import (
     ConversationSummary,
 )
+from app.models.session import Session as SessionModel
 
 from app.utils.file_utils import save_json_file, load_json_file, write_text_file
 
@@ -401,11 +402,9 @@ def get_all_sessions():
 
     with Session(engine) as session:
 
-        memory_sessions = session.exec(select(ConversationMemory.session_id)).all()
+        sessions = session.exec(select(SessionModel)).all()
 
-        summary_sessions = session.exec(select(ConversationSummary.session_id)).all()
-
-    return sorted(set(memory_sessions) | set(summary_sessions))
+    return sessions
 
 
 def get_session_history(
@@ -418,7 +417,7 @@ def get_session_history(
         rows = session.exec(
             select(ConversationMemory)
             .where(ConversationMemory.session_id == session_id)
-            .order_by(ConversationMemory.created_at.desc())
+            .order_by(ConversationMemory.created_at.asc())
         ).all()
 
     total = len(rows)
@@ -428,23 +427,15 @@ def get_session_history(
     items = []
 
     for row in rows[start:end]:
-        item = row.model_dump()
-        # print(item)
-        items.append(item)
-    return {
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": [
+        items.append(
             {
-                "id": row["id"],
-                "question": row["question"],
-                "answer": row["answer"],
-                "created_at": row["created_at"],
+                "id": row.id,
+                "question": row.question,
+                "answer": row.answer,
+                "created_at": row.created_at,
             }
-            for row in items
-        ],
-    }
+        )
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
 
 
 def delete_session_memory(

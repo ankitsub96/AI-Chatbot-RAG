@@ -3,86 +3,101 @@
 .sidebar {
   width: $sidebar-w;
   min-width: $sidebar-w;
-  background: $bg2;
-  border-right: 1px solid $border;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: background 0.3s, border-color 0.3s;
 
   &__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 14px 12px;
-    border-bottom: 1px solid $border;
+    padding: 18px 14px 14px;
+    border-bottom: 1px solid var(--border);
   }
 
   &__logo {
-    font-size: 15px;
-    font-weight: 600;
-    color: $text;
-    letter-spacing: -0.3px;
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -0.5px;
 
     em {
       font-style: normal;
-      color: $accent-mid;
+      color: var(--accent);
+      opacity: 0.9;
     }
   }
 
   &__header-actions {
     display: flex;
-    gap: 6px;
+    gap: 5px;
     align-items: center;
   }
 
   &__action {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     border-radius: $radius-sm;
-    background: $bg3;
-    border: 1px solid $border;
-    color: $text-muted;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     font-size: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+
+    svg { width: 14px; height: 14px; stroke: currentColor; fill: none; }
 
     &:hover {
-      background: $accent-soft;
-      border-color: $accent;
-      color: $accent-mid;
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
+
+    &:active { transform: scale(0.93); }
   }
 
   &__new {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     border-radius: $radius-sm;
-    background: $bg3;
-    border: 1px solid $border;
-    color: $text-muted;
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: var(--bg);
     font-size: 18px;
     line-height: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+
+    svg { width: 14px; height: 14px; stroke: currentColor; fill: none; }
 
     &:hover {
-      background: $accent-soft;
-      border-color: $accent;
-      color: $accent-mid;
+      opacity: 0.88;
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
+    &:active { transform: scale(0.93); }
+  }
+
+  &__section {
+    padding: 14px 14px 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
 
   &__label {
-    padding: 16px 14px 6px;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.5px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
-    color: $text-dim;
+    color: var(--text-dim);
   }
 
   &__sessions {
@@ -92,92 +107,146 @@
   }
 
   &__empty {
-    padding: 24px 12px;
-    color: $text-dim;
+    padding: 32px 12px;
+    color: var(--text-dim);
     font-size: 12px;
     text-align: center;
-    line-height: 1.5;
+    line-height: 1.6;
+    font-weight: 400;
+
+    strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
   }
 
   &__item {
     display: flex;
     align-items: center;
-    padding: 8px 8px;
+    padding: 9px 10px;
     border-radius: $radius-sm;
     cursor: pointer;
-    margin-bottom: 1px;
-    transition: background 0.1s;
-    gap: 8px;
+    margin-bottom: 2px;
+    gap: 9px;
     border: 1px solid transparent;
+    transition: background 0.12s, border-color 0.12s;
+    position: relative;
 
-    &:hover { background: $bg3; }
+    &:hover {
+      background: var(--bg3);
+      border-color: var(--border);
+    }
 
     &.active {
-      background: $accent-soft;
-      border-color: rgba($accent, 0.3);
+      background: var(--accent-soft);
+      border-color: rgba(108, 108, 255, 0.2);
 
-      .sidebar__item-label { color: $text; font-weight: 500; }
-      .sidebar__item-icon { color: $accent-mid; }
+      .sidebar__item-label { color: var(--text); font-weight: 600; }
+      .sidebar__item-icon { color: var(--accent); }
     }
   }
 
   &__item-icon {
-    color: $text-dim;
-    font-size: 13px;
+    color: var(--text-dim);
+    font-size: 12px;
     flex-shrink: 0;
     width: 16px;
     text-align: center;
+    svg { width: 13px; height: 13px; stroke: currentColor; fill: none; }
   }
 
   &__item-label {
     font-size: 13px;
-    color: $text-muted;
+    font-weight: 500;
+    color: var(--text-muted);
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
     flex: 1;
   }
 
+  &__item-time {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: $font-mono;
+    flex-shrink: 0;
+  }
+
   &__delete {
     opacity: 0;
-    color: $text-dim;
-    font-size: 13px;
-    padding: 2px 5px;
-    border-radius: $radius-sm;
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 3px 5px;
+    border-radius: $radius-xs;
     transition: all 0.15s;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+
+    svg { width: 12px; height: 12px; stroke: currentColor; fill: none; }
 
     .sidebar__item:hover & { opacity: 1; }
 
     &:hover {
-      color: $red;
-      background: rgba($red, 0.1);
+      color: var(--red);
+      background: rgba(248, 113, 113, 0.12);
     }
   }
 
   &__footer {
-    padding: 10px 14px;
-    border-top: 1px solid $border;
-    font-size: 11px;
-    color: $text-dim;
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  &__status {
     display: flex;
     align-items: center;
     gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: $font-mono;
+  }
 
-    &::before {
-      content: '';
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: $green;
-      box-shadow: 0 0 6px $green;
-      flex-shrink: 0;
-      animation: live-pulse 2.5s ease-in-out infinite;
+  &__status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: live-pulse 2.5s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  &__theme-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 3px 7px;
+    border-radius: $radius-xs;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    transition: all 0.15s;
+    font-family: $font-ui;
+
+    svg { width: 11px; height: 11px; stroke: currentColor; fill: none; }
+
+    &:hover {
+      color: var(--text-muted);
+      border-color: var(--border2);
+      background: var(--bg4);
     }
   }
 }
 
 @keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.4; }
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px var(--green); }
+  50%       { opacity: 0.4; box-shadow: 0 0 2px var(--green); }
 }

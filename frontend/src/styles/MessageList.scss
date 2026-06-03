@@ -1,75 +1,225 @@
 @use './global' as *;
 
+.messages-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+// ── Thinking Drawer ───────────────────────────────────────
+.thinking-drawer {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--thinking-border);
+  background: var(--thinking-bg);
+  overflow: hidden;
+  transition: background 0.3s, border-color 0.3s;
+
+  &__toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 20px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    font-family: $font-ui;
+    cursor: pointer;
+    transition: background 0.15s;
+
+    &:hover { background: var(--accent-soft); }
+
+    svg {
+      width: 13px;
+      height: 13px;
+      stroke: currentColor;
+      fill: none;
+      flex-shrink: 0;
+      transition: transform 0.2s ease;
+    }
+
+    &.open svg.chevron { transform: rotate(180deg); }
+  }
+
+  &__spinner {
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--accent-soft);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  &__count {
+    font-size: 10px;
+    font-family: $font-mono;
+    color: var(--text-dim);
+    background: var(--bg4);
+    padding: 1px 6px;
+    border-radius: 99px;
+    border: 1px solid var(--border2);
+  }
+
+  &__label {
+    flex: 1;
+    letter-spacing: 0.3px;
+  }
+
+  &__chevron-wrap {
+    margin-left: auto;
+  }
+
+  &__body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+
+    &.open {
+      max-height: 260px;
+    }
+  }
+
+  &__steps {
+    padding: 2px 20px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    max-height: 240px;
+  }
+
+  &__step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    animation: step-in 0.2s ease;
+
+    &-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-top: 5px;
+      flex-shrink: 0;
+      opacity: 0.6;
+    }
+
+    &-content {
+      flex: 1;
+    }
+
+    &-event {
+      font-size: 10px;
+      font-family: $font-mono;
+      color: var(--accent);
+      opacity: 0.7;
+      font-weight: 500;
+    }
+
+    &-msg {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-top: 1px;
+    }
+  }
+}
+
+// ── Messages ──────────────────────────────────────────────
 .messages {
   flex: 1;
   overflow-y: auto;
   padding: 28px 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 22px;
 }
 
 .message {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  animation: msg-in 0.2s ease;
+  gap: 5px;
+  animation: msg-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 
   &--user {
     align-self: flex-end;
     align-items: flex-end;
-    max-width: 68%;
+    max-width: 66%;
 
-    .message__meta {
-      flex-direction: row-reverse;
-    }
+    .message__meta { flex-direction: row-reverse; }
 
     .message__content {
-      background: $accent-soft;
-      border: 1px solid rgba($accent, 0.25);
+      background: var(--accent-soft);
+      border: 1px solid rgba(108, 108, 255, 0.2);
       border-radius: $radius $radius 2px $radius;
-      color: $text;
+      color: var(--text);
     }
   }
 
   &--assistant {
     align-self: flex-start;
     align-items: flex-start;
-    max-width: 82%;
+    max-width: 80%;
 
     .message__content {
-      background: $bg2;
-      border: 1px solid $border;
-      border-left: 2px solid $accent;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--accent);
       border-radius: 2px $radius $radius $radius;
-      color: $text;
+      color: var(--text);
+      font-family: $font-reading;
+      font-size: 14px;
+      line-height: 1.8;
     }
   }
 
   &__meta {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 2px;
+    gap: 7px;
+    padding: 0 3px;
+  }
+
+  &__avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    flex-shrink: 0;
+
+    .message--user & {
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-mid);
+      color: var(--accent);
+    }
+
+    .message--assistant & {
+      background: var(--bg3);
+      border: 1px solid var(--border2);
+      color: var(--text-dim);
+    }
+
+    svg { width: 11px; height: 11px; stroke: currentColor; fill: none; }
   }
 
   &__role {
     font-size: 11px;
-    font-weight: 500;
-    color: $text-dim;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--text-dim);
 
-    .message--user & {
-      color: $text-dim;
-    }
-
-    .message--assistant & {
-      color: $accent-mid;
-    }
+    .message--assistant & { color: var(--accent); opacity: 0.85; }
   }
 
   &__time {
-    font-size: 11px;
-    color: $text-dim;
+    font-size: 10px;
+    color: var(--text-dim);
     font-family: $font-mono;
   }
 
@@ -84,20 +234,21 @@
   &__cursor {
     display: inline-block;
     width: 2px;
-    height: 15px;
-    background: $accent-mid;
+    height: 14px;
+    background: var(--accent);
     margin-left: 2px;
     vertical-align: middle;
     border-radius: 1px;
-    animation: cursor-blink 0.6s step-end infinite;
+    animation: cursor-blink 0.65s step-end infinite;
   }
 
   &__dots {
     display: flex;
-    gap: 4px;
+    gap: 5px;
     padding: 14px 16px;
-    background: $bg2;
-    border: 1px solid $border;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
     border-radius: 2px $radius $radius $radius;
     align-items: center;
 
@@ -105,16 +256,11 @@
       width: 5px;
       height: 5px;
       border-radius: 50%;
-      background: $text-dim;
-      animation: dot-bounce 1.2s ease-in-out infinite;
+      background: var(--text-dim);
+      animation: dot-bounce 1.3s ease-in-out infinite;
 
-      &:nth-child(2) {
-        animation-delay: 0.15s;
-      }
-
-      &:nth-child(3) {
-        animation-delay: 0.3s;
-      }
+      &:nth-child(2) { animation-delay: 0.15s; }
+      &:nth-child(3) { animation-delay: 0.3s; }
     }
   }
 }
@@ -125,54 +271,42 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
 
   &__glyph {
-    font-size: 32px;
-    opacity: 0.15;
+    font-size: 36px;
+    opacity: 0.1;
+    line-height: 1;
   }
 
   &__text {
     font-size: 13px;
-    color: $text-dim;
-    font-weight: 500;
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.5px;
   }
 }
 
 @keyframes msg-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes cursor-blink {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0;
-  }
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
 }
 
 @keyframes dot-bounce {
+  0%, 100% { transform: translateY(0); opacity: 0.35; }
+  50%       { transform: translateY(-4px); opacity: 1; }
+}
 
-  0%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.4;
-  }
+@keyframes step-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
 
-  50% {
-    transform: translateY(-3px);
-    opacity: 1;
-  }
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }

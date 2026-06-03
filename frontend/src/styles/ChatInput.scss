@@ -1,9 +1,10 @@
 @use './global' as *;
 
 .chat-input {
-  border-top: 1px solid $border;
+  border-top: 1px solid var(--border);
   padding: 14px 20px 18px;
-  background: $bg2;
+  background: var(--bg2);
+  transition: background 0.3s, border-color 0.3s;
 
   &__toolbar {
     display: flex;
@@ -17,23 +18,25 @@
     align-items: center;
     gap: 7px;
     font-size: 12px;
-    color: $text-muted;
+    color: var(--text-muted);
     cursor: pointer;
     user-select: none;
     transition: color 0.15s;
+    font-weight: 500;
 
-    &:hover { color: $text; }
+    &:hover { color: var(--text); }
 
     input[type='checkbox'] {
       appearance: none;
       width: 32px;
       height: 17px;
-      background: $bg4;
-      border: 1px solid $border2;
+      background: var(--bg4);
+      border: 1px solid var(--border2);
       border-radius: 99px;
       cursor: pointer;
       position: relative;
       transition: all 0.2s;
+      flex-shrink: 0;
 
       &::after {
         content: '';
@@ -43,36 +46,33 @@
         width: 11px;
         height: 11px;
         border-radius: 50%;
-        background: $text-dim;
+        background: var(--text-dim);
         transition: all 0.2s;
       }
 
       &:checked {
-        background: $accent;
-        border-color: $accent;
-
-        &::after {
-          left: 17px;
-          background: #fff;
-        }
+        background: var(--accent);
+        border-color: var(--accent);
+        &::after { left: 17px; background: var(--bg); }
       }
     }
   }
 
   &__hint {
     font-size: 11px;
-    color: $text-dim;
+    color: var(--text-dim);
     display: flex;
     gap: 8px;
+    align-items: center;
 
     kbd {
-      background: $bg3;
-      border: 1px solid $border2;
-      border-radius: 4px;
+      background: var(--bg3);
+      border: 1px solid var(--border2);
+      border-radius: $radius-xs;
       padding: 1px 5px;
       font-family: $font-mono;
       font-size: 10px;
-      color: $text-muted;
+      color: var(--text-muted);
     }
   }
 
@@ -82,58 +82,57 @@
     align-items: flex-end;
   }
 
-  &__prefix {
-    display: none; // removed — cleaner without it
-  }
-
   &__area {
     flex: 1;
-    background: $bg3;
-    border: 1px solid $border;
+    background: var(--bg3);
+    border: 1px solid var(--border);
     border-radius: $radius;
     padding: 10px 14px;
     font-size: 14px;
     line-height: 1.6;
     resize: none;
     outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.3s;
     max-height: 150px;
     overflow-y: auto;
+    color: var(--text);
 
     &:focus {
-      border-color: $accent;
-      box-shadow: 0 0 0 3px rgba($accent, 0.1);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
 
     &:disabled { opacity: 0.5; }
-    &::placeholder { color: $text-dim; }
+    &::placeholder { color: var(--text-dim); }
   }
 
   &__send {
     width: 40px;
     height: 40px;
     border-radius: $radius;
-    background: $accent;
-    color: #fff;
-    font-size: 16px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 15px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
-    font-family: $font-mono;
+
+    svg { width: 15px; height: 15px; stroke: currentColor; fill: none; }
 
     &:hover:not(:disabled) {
       opacity: 0.88;
-      box-shadow: 0 0 0 3px rgba($accent, 0.25);
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
 
-    &:active:not(:disabled) { transform: scale(0.95); }
+    &:active:not(:disabled) { transform: scale(0.93); }
 
     &:disabled {
-      background: $bg4;
-      color: $text-dim;
+      background: var(--bg4);
+      color: var(--text-dim);
       cursor: not-allowed;
+      opacity: 1;
     }
   }
 }
