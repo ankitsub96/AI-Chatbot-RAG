@@ -3,6 +3,7 @@ import json
 import asyncio
 from sqlmodel import Session, select
 from sqlalchemy import text
+from concurrent.futures import ThreadPoolExecutor
 
 from app.services.llm_service import generate_response
 from app.services.vector_search_service import (
@@ -307,44 +308,68 @@ def retrieve_relevant_memories(
     print("\nMEMORY RETRIEVAL")
 
     query_embedding = create_embedding(question)
-
     embedding_str = str(query_embedding[0].tolist())
 
     context = ""
 
-    with Session(engine) as session:
-
-        # =========================
-        # LONG TERM SUMMARIES
-        # =========================
-
-        summary_rows = session.execute(
-            text("""
-                SELECT
-                    summary,
-                    embedding <=> CAST(:embedding AS vector) AS distance
-                FROM conversation_summaries
-                WHERE session_id = :session_id
-                ORDER BY embedding <=> CAST(:embedding AS vector)
-                LIMIT :limit
-                """),
-            {
-                "session_id": session_id,
-                "embedding": embedding_str,
-                "limit": SUMMARY_TOP_K,
-            },
-        ).mappings()
-
-        for row in summary_rows:
-
-            print(
-                {
-                    "type": "summary",
-                    "distance": row["distance"],
-                }
+    def get_summaries():
+        with Session(engine) as session:
+            return list(
+                session.execute(
+                    text("""
+                        SELECT
+                            summary,
+                            embedding <=> CAST(:embedding AS vector) AS distance
+                        FROM conversation_summaries
+                        WHERE session_id = :session_id
+                        ORDER BY embedding <=> CAST(:embedding AS vector)
+                        LIMIT :limit
+                    """),
+                    {
+                        "session_id": session_id,
+                        "embedding": embedding_str,
+                        "limit": SUMMARY_TOP_K,
+                    },
+                ).mappings()
             )
 
-            context += f"""
+    def get_memories():
+        with Session(engine) as session:
+            return list(
+                session.execute(
+                    text("""
+                        SELECT
+                            text,
+                            embedding <=> CAST(:embedding AS vector) AS distance
+                        FROM conversation_memories
+                        WHERE session_id = :session_id
+                        ORDER BY embedding <=> CAST(:embedding AS vector)
+                        LIMIT :limit
+                    """),
+                    {
+                        "session_id": session_id,
+                        "embedding": embedding_str,
+                        "limit": MEMORY_TOP_K,
+                    },
+                ).mappings()
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        summary_future = executor.submit(get_summaries)
+        memory_future = executor.submit(get_memories)
+
+        summary_rows = summary_future.result()
+        memory_rows = memory_future.result()
+
+    for row in summary_rows:
+        print(
+            {
+                "type": "summary",
+                "distance": row["distance"],
+            }
+        )
+
+        context += f"""
 
 LONG TERM MEMORY
 
@@ -352,37 +377,15 @@ LONG TERM MEMORY
 
 """
 
-        # =========================
-        # RECENT MEMORIES
-        # =========================
-
-        memory_rows = session.execute(
-            text("""
-                SELECT
-                    text,
-                    embedding <=> CAST(:embedding AS vector) AS distance
-                FROM conversation_memories
-                WHERE session_id = :session_id
-                ORDER BY embedding <=> CAST(:embedding AS vector)
-                LIMIT :limit
-                """),
+    for row in memory_rows:
+        print(
             {
-                "session_id": session_id,
-                "embedding": embedding_str,
-                "limit": MEMORY_TOP_K,
-            },
-        ).mappings()
+                "type": "memory",
+                "distance": row["distance"],
+            }
+        )
 
-        for row in memory_rows:
-
-            print(
-                {
-                    "type": "memory",
-                    "distance": row["distance"],
-                }
-            )
-
-            context += f"""
+        context += f"""
 
 RECENT MEMORY
 

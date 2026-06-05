@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.config.settings import EMBED_MODEL
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
+from app.utils.helpers import timer
 
 embedding_model = SentenceTransformer(EMBED_MODEL)
 
@@ -130,9 +131,9 @@ def keyword_search(
 # =====================================================
 
 
+@timer
 def hybrid_search(
     *,
-    session: Session,
     query: str,
     query_embedding,
     document_id: str | None = None,
@@ -142,20 +143,42 @@ def hybrid_search(
 ):
     print("hybrid_search::")
 
-    vector_results = vector_search(
-        session=session,
-        query_embedding=query_embedding,
-        document_id=document_id,
-        top_k=top_k * 3,
-    )
+    @timer
+    def run_vector():
+        with Session(engine) as session:
+            return vector_search(
+                session=session,
+                query_embedding=query_embedding,
+                document_id=document_id,
+                top_k=top_k * 3,
+            )
 
-    keyword_results = keyword_search(
-        session=session,
-        query=query,
-        document_id=document_id,
-        top_k=top_k * 3,
-    )
+    @timer
+    def run_keyword():
+        with Session(engine) as session:
+            return keyword_search(
+                session=session,
+                query=query,
+                document_id=document_id,
+                top_k=top_k * 3,
+            )
 
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(run_vector)
+        keyword_future = executor.submit(run_keyword)
+
+        vector_results = vector_future.result()
+        keyword_results = keyword_future.result()
+
+    # Reciprocal Rank Fusion (RRF):
+    # Combines vector and keyword search rankings using:
+    #
+    #     score = weight * (1 / (k + rank))
+    #
+    # Documents appearing in both result sets receive
+    # contributions from both retrievers and are ranked higher.
+    # RRF uses rank positions instead of raw similarity scores,
+    # making it robust across different retrieval methods.
     vector_ranks = {row["id"]: rank + 1 for rank, row in enumerate(vector_results)}
     keyword_ranks = {row["id"]: rank + 1 for rank, row in enumerate(keyword_results)}
 
@@ -424,6 +447,7 @@ def select_top_parents(
     return ranked[:top_n]
 
 
+@timer
 def expand_parent_chunks(
     *,
     session: Session,

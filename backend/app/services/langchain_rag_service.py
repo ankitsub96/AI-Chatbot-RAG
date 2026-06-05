@@ -10,7 +10,8 @@ from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
-from concurrent.futures import ThreadPoolExecutor
+from pydantic import Field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 from sqlmodel import Session, select
@@ -39,6 +40,7 @@ from app.services.vector_search_service import (
     expand_parent_chunks,
 )
 from app.utils.helpers import format_sse, thinking, token_event, done_event
+from app.utils.helpers import timer
 from app.config.settings import TOP_K
 
 # ── shared LLM instances ──────────────────────────────────────────────────────
@@ -80,41 +82,131 @@ def _resolve_document_ids(session_id: str) -> list[str]:
 
 
 class PostgresRetriever(BaseRetriever):
-
     session_id: str
-    query_embedding: object
+    query_embedding: object | None = None
     query: str = ""
-    trace: list = []
-    document_ids_filter: list[str] | None = None  # if set, skip session resolution
+    trace: list = Field(default_factory=list)
+    document_ids_filter: list[str] | None = None
+
+    # -------------------------
+    # logging
+    # -------------------------
 
     def _log(self, step: str, data=None):
-        msg = {"step": step, "data": data, "ts": time.time()}
+        msg = {
+            "step": step,
+            "data": data,
+            "ts": time.time(),
+        }
+
         self.trace.append(msg)
+
         print(f"\n✓ {step}")
+
         if data:
             print(data)
 
-    def _search_single_document(self, document_id: str):
-        self._log("search.single_document.start", {"document_id": document_id})
+    # -------------------------
+    # query expansion
+    # -------------------------
 
-        with Session(engine) as session:
-            results = hybrid_search(
-                session=session,
-                query=self.query,
-                query_embedding=self.query_embedding,
-                document_id=document_id,
-                top_k=TOP_K,
+    def _expand_queries(self, query: str) -> list[str]:
+        try:
+            expanded = expand_query_sync(
+                question=query,
+                n=10,
+            )
+        except Exception as e:
+            self._log(
+                "retriever.query_expansion.error",
+                {"error": str(e)},
             )
 
-        self._log(
-            "search.single_document.done",
-            {
-                "document_id": document_id,
-                "results": len(results),
-            },
+            expanded = []
+
+        queries = [query]
+
+        for q in expanded:
+            if q and q not in queries:
+                queries.append(q)
+
+        return queries
+
+    # -------------------------
+    # search one document
+    # -------------------------
+
+    def _search_document(
+        self,
+        query: str,
+        query_embedding,
+        document_id: str,
+    ):
+        try:
+            with Session(engine) as session:
+                return hybrid_search(
+                    # session=session,
+                    query=query,
+                    query_embedding=query_embedding,
+                    document_id=document_id,
+                    top_k=TOP_K,
+                )
+
+        except Exception as e:
+            self._log(
+                "search.document.error",
+                {
+                    "document_id": document_id,
+                    "error": str(e),
+                },
+            )
+
+            return []
+
+    # -------------------------
+    # search one query
+    # -------------------------
+
+    def _retrieve_for_query(
+        self,
+        query: str,
+        query_embedding,
+        document_ids: list[str],
+    ):
+        results = []
+
+        workers = min(
+            max(1, len(document_ids)),
+            16,
         )
 
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+
+            futures = {
+                executor.submit(
+                    self._search_document,
+                    query,
+                    query_embedding,
+                    doc_id,
+                ): doc_id
+                for doc_id in document_ids
+            }
+
+            for future in as_completed(futures):
+                try:
+                    results.extend(future.result())
+
+                except Exception as e:
+                    self._log(
+                        "search.document.future_error",
+                        {"error": str(e)},
+                    )
+
         return results
+
+    # -------------------------
+    # main retrieval
+    # -------------------------
 
     def _get_relevant_documents(
         self,
@@ -127,23 +219,28 @@ class PostgresRetriever(BaseRetriever):
 
         self._log("retriever.start")
         self._log("retriever.query_received", query)
-        self._log("retriever.session_id", self.session_id)
 
         self.query = query
 
-        # resolve document_ids
+        # =====================
+        # resolve docs
+        # =====================
+
         if self.document_ids_filter:
             document_ids = self.document_ids_filter
+
             self._log(
-                "retriever.document_ids_from_filter", {"document_ids": document_ids}
+                "retriever.document_ids_from_filter",
+                {"document_ids": document_ids},
             )
+
         else:
             document_ids = _resolve_document_ids(self.session_id)
+
             self._log(
                 "retriever.document_ids_resolved",
                 {
-                    "session_id": self.session_id,
-                    "document_ids": document_ids,
+                    "count": len(document_ids),
                 },
             )
 
@@ -151,71 +248,185 @@ class PostgresRetriever(BaseRetriever):
             self._log("retriever.no_documents")
             return []
 
-        # search children in parallel
-        self._log("retriever.searching_documents", {"count": len(document_ids)})
+        # =====================
+        # query expansion
+        # =====================
 
-        worker_count = min(len(document_ids), 8)
+        expanded_queries = self._expand_queries(query)
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            search_results = list(
-                executor.map(self._search_single_document, document_ids)
+        self._log(
+            "retriever.query_expansion.done",
+            {
+                "count": len(expanded_queries),
+                "queries": expanded_queries,
+            },
+        )
+
+        # =====================
+        # embeddings
+        # =====================
+
+        self._log(
+            "retriever.embedding.start",
+            {"queries": len(expanded_queries)},
+        )
+
+        with ThreadPoolExecutor(max_workers=min(len(expanded_queries), 8)) as executor:
+
+            embeddings = list(
+                executor.map(
+                    create_embedding,
+                    expanded_queries,
+                )
             )
 
-        all_results = []
-        for result_set in search_results:
-            all_results.extend(result_set)
+        self._log(
+            "retriever.embedding.done",
+            {
+                "embeddings": len(embeddings),
+            },
+        )
 
-        self._log("retriever.candidates", {"total": len(all_results)})
+        # =====================
+        # retrieval
+        # =====================
 
-        # =========================
-        # PARENT GROUPING + SELECTION
-        # =========================
+        self._log(
+            "retriever.multi_query.start",
+            {
+                "queries": len(expanded_queries),
+                "documents": len(document_ids),
+            },
+        )
+
+        all_result_sets = []
+
+        with ThreadPoolExecutor(max_workers=min(len(expanded_queries), 8)) as executor:
+
+            futures = [
+                executor.submit(
+                    self._retrieve_for_query,
+                    q,
+                    emb,
+                    document_ids,
+                )
+                for q, emb in zip(
+                    expanded_queries,
+                    embeddings,
+                )
+            ]
+
+            for future in as_completed(futures):
+                try:
+                    all_result_sets.append(future.result())
+
+                except Exception as e:
+                    self._log(
+                        "retriever.query_error",
+                        {"error": str(e)},
+                    )
+
+        # =====================
+        # RRF merge
+        # =====================
+
+        rrf_k = 60
+
+        merged = {}
+
+        for result_set in all_result_sets:
+
+            ranked = sorted(
+                result_set,
+                key=lambda x: x.get(
+                    "score",
+                    0,
+                ),
+                reverse=True,
+            )
+
+            for rank, row in enumerate(ranked):
+
+                chunk_id = row["id"]
+
+                rrf_score = 1 / (rrf_k + rank + 1)
+
+                if chunk_id not in merged:
+
+                    merged[chunk_id] = {
+                        **row,
+                        "rrf_score": 0,
+                    }
+
+                merged[chunk_id]["rrf_score"] += rrf_score
+
+        all_results = sorted(
+            merged.values(),
+            key=lambda x: x["rrf_score"],
+            reverse=True,
+        )
+
+        self._log(
+            "retriever.rrf.done",
+            {
+                "unique_chunks": len(all_results),
+            },
+        )
+
+        # =====================
+        # parent grouping
+        # =====================
 
         grouped = group_chunks_by_parent(all_results)
-        top_parents = select_top_parents(grouped, top_n=TOP_K)
+
+        top_parents = select_top_parents(
+            grouped,
+            top_n=TOP_K,
+        )
 
         self._log(
             "retriever.parents_selected",
             {
                 "total_parents": len(grouped),
-                "top_parents": len(top_parents),
+                "selected": len(top_parents),
             },
         )
 
-        # =========================
-        # CONTEXT EXPANSION
-        # =========================
+        # =====================
+        # parent expansion
+        # =====================
 
         parent_ids = [p["parent_id"] for p in top_parents]
 
-        with Session(engine) as db:
+        with Session(engine) as session:
             expanded = expand_parent_chunks(
-                session=db,
+                session=session,
                 parent_ids=parent_ids,
             )
 
-        self._log(
-            "retriever.expanded",
-            {
-                "parents_expanded": len(expanded),
-                "execution_time_sec": round(time.time() - start, 3),
-            },
-        )
-
-        # =========================
-        # RETURN LANGCHAIN DOCUMENTS
-        # one Document per parent — full expanded context as page_content
-        # =========================
+        # =====================
+        # build docs
+        # =====================
 
         documents = []
 
         for parent in top_parents:
+
             parent_id = parent["parent_id"]
-            children = expanded.get(parent_id, parent["chunks"])
-            children = sorted(children, key=lambda c: c.get("chunk_index") or 0)
+
+            children = expanded.get(
+                parent_id,
+                parent["chunks"],
+            )
+
+            children = sorted(
+                children,
+                key=lambda c: c.get("chunk_index", 0),
+            )
+
+            full_text = "\n\n".join(c["text"] for c in children)
 
             page = children[0].get("page", "?") if children else "?"
-            full_text = "\n\n".join(child["text"] for child in children)
 
             documents.append(
                 Document(
@@ -227,10 +438,22 @@ class PostgresRetriever(BaseRetriever):
                             children[0].get("document_id") if children else None
                         ),
                         "score": parent["score"],
+                        "rrf_score": parent.get("rrf_score"),
                         "child_count": len(children),
                     },
                 )
             )
+
+        self._log(
+            "retriever.complete",
+            {
+                "documents": len(documents),
+                "execution_time_sec": round(
+                    time.time() - start,
+                    3,
+                ),
+            },
+        )
 
         return documents
 
@@ -487,3 +710,84 @@ QUESTION
     schedule_saves(answer)
 
     return answer
+
+
+@timer
+def expand_query_sync(
+    question: str,
+    memory_context: str = "",
+    n: int = 4,
+) -> list[str]:
+    """
+    Synchronous wrapper around expand_query().
+    Safe to call from LangChain retrievers.
+    """
+
+    prompt = f"""
+    You are a query rewriting assistant for a retrieval system.
+
+    Your goal is to generate search queries that retrieve evidence relevant to the ORIGINAL QUESTION.
+
+    IMPORTANT:
+    - Preserve the original meaning and intent.
+    - Do NOT broaden the topic.
+    - Do NOT introduce new questions.
+    - Do NOT introduce related themes that are not explicitly present.
+    - Keep important named entities, characters, places, events, and concepts.
+    - Focus on alternative wording, terminology, and phrasing.
+    - Queries should retrieve overlapping evidence from different lexical angles.
+    - Avoid generic or high-level summaries.
+
+    Conversation history:
+    {memory_context or "None"}
+
+    Original question:
+    {question}
+
+    Generate exactly {n} rewritten search queries.
+
+    Good examples:
+
+    Question:
+    Why did Murtagh remain loyal to Galbatorix?
+
+    Good rewrites:
+    [
+    "Reasons for Murtagh's loyalty to Galbatorix",
+    "What motivated Murtagh to serve Galbatorix",
+    "Factors influencing Murtagh's allegiance to Galbatorix",
+    "Murtagh's relationship with Galbatorix and loyalty"
+    ]
+
+    Bad rewrites:
+    [
+    "Dragon rider politics",
+    "Power struggles in Alagaësia",
+    "History of Galbatorix",
+    "Murtagh character analysis"
+    ]
+
+    Return ONLY a JSON array of strings.
+    """
+
+    try:
+        response = llmGroq.invoke([{"role": "user", "content": prompt}])
+
+        raw = response.content.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+
+        queries = json.loads(raw)
+
+        if isinstance(queries, list):
+            all_queries = [question]
+
+            for q in queries:
+                if isinstance(q, str) and q.strip() and q not in all_queries:
+                    all_queries.append(q)
+            print({"all_queries": all_queries})
+            return all_queries[: n + 1]
+
+    except Exception as e:
+        print(f"[expand_query_sync] failed: {e}")
+
+    return [question]
