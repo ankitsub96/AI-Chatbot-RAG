@@ -15,7 +15,7 @@ from app.services.rag_service import (
     cleanup_orphan_documents,
 )
 from app.services.langchain_rag_service import ask_document_langchain
-from app.models.rag_model import AskDocumentRequest
+from app.models.rag_model import AskDocumentRequest, AgentAskRequest
 from app.models.session_model import SearchMemoryRequest
 from app.models.document import Document
 from app.models.session_document import SessionDocument
@@ -28,6 +28,7 @@ from app.services.memory_service import (
     semantic_search_session,
     delete_session_memory,
 )
+from app.services.agentic_rag_service import run_agent
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
@@ -187,6 +188,28 @@ async def ask_pdf_langchain(
     if stream:
         if not hasattr(result, "__aiter__"):
             raise ValueError("Expected async generator for streaming mode")
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return {"answer": result}
+
+
+@router.post("/ask/agent")
+async def ask_agent(payload: AgentAskRequest):
+    result = await run_agent(
+        session_id=payload.session_id,
+        question=payload.question,
+        document_ids=payload.document_ids,
+        stream=payload.stream,
+    )
+
+    if payload.stream:
         return StreamingResponse(
             result,
             media_type="text/event-stream",

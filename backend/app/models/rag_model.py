@@ -8,3 +8,10 @@ class AskDocumentRequest(BaseModel):
     document_ids: list[str] | None = (
         None  # optional subset — None means all session docs
     )
+
+
+class AgentAskRequest(BaseModel):
+    session_id: str
+    question: str
+    document_ids: list[str] | None = None
+    stream: bool = True

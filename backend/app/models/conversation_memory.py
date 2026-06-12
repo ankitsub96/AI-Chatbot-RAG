@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
 from sqlmodel import SQLModel, Field
 
@@ -21,3 +22,5 @@ class ConversationMemory(SQLModel, table=True):
     embedding: list[float] = Field(sa_column=Column(Vector(768)))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    thoughts: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))

@@ -143,6 +143,7 @@ async def save_conversation_turn(
     session_id: str,
     question: str,
     answer: str,
+    thoughts: list[dict] | None = None,
 ):
     print("\n" + "=" * 80)
     print("SAVING CONVERSATION MEMORY")
@@ -174,6 +175,7 @@ ASSISTANT:
                 answer=answer,
                 text=memory_text,
                 embedding=embedding[0].tolist(),
+                thoughts=thoughts,
             )
         )
 
@@ -237,18 +239,18 @@ ASSISTANT:
         # KEEP RECENT ONLY
         # =========================
 
-        old_ids = [memory.id for memory in old_memories]
+        # old_ids = [memory.id for memory in old_memories]
 
-        with Session(engine) as session:
+        # with Session(engine) as session:
 
-            rows = session.exec(
-                select(ConversationMemory).where(ConversationMemory.id.in_(old_ids))
-            ).all()
+        #     rows = session.exec(
+        #         select(ConversationMemory).where(ConversationMemory.id.in_(old_ids))
+        #     ).all()
 
-            for row in rows:
-                session.delete(row)
+        #     for row in rows:
+        #         session.delete(row)
 
-            session.commit()
+        #     session.commit()
 
     print("\nMEMORY SAVE COMPLETE")
 

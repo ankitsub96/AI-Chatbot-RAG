@@ -67,14 +67,14 @@ def vector_search(
     *,
     session: Session,
     query_embedding,
-    document_id: str | None = None,
+    document_ids: list[str] | None = None,
     top_k: int = 20,
 ):
     print("vector_search::")
     stmt = select(DocumentChunk)
 
-    if document_id:
-        stmt = stmt.where(DocumentChunk.document_id == document_id)
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
 
     stmt = stmt.order_by(
         DocumentChunk.embedding.op("<=>")(query_embedding[0].tolist())
@@ -100,7 +100,7 @@ def keyword_search(
     *,
     session: Session,
     query: str,
-    document_id: str | None = None,
+    document_ids: list[str] | None = None,
     top_k: int = 20,
 ):
     ts_query = func.plainto_tsquery("simple", query)
@@ -110,8 +110,8 @@ def keyword_search(
         func.ts_rank(DocumentChunk.tsv, ts_query).label("score"),
     ).where(DocumentChunk.tsv.op("@@")(ts_query))
 
-    if document_id:
-        stmt = stmt.where(DocumentChunk.document_id == document_id)
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
 
     stmt = stmt.order_by(func.ts_rank(DocumentChunk.tsv, ts_query).desc()).limit(top_k)
 
@@ -136,7 +136,7 @@ def hybrid_search(
     *,
     query: str,
     query_embedding,
-    document_id: str | None = None,
+    document_ids: list[str] | None = None,
     top_k: int = 10,
     vector_weight: float = 0.6,
     keyword_weight: float = 0.4,
@@ -149,7 +149,7 @@ def hybrid_search(
             return vector_search(
                 session=session,
                 query_embedding=query_embedding,
-                document_id=document_id,
+                document_ids=document_ids,
                 top_k=top_k * 3,
             )
 
@@ -159,7 +159,7 @@ def hybrid_search(
             return keyword_search(
                 session=session,
                 query=query,
-                document_id=document_id,
+                document_ids=document_ids,
                 top_k=top_k * 3,
             )
 
@@ -452,7 +452,7 @@ def expand_parent_chunks(
     *,
     session: Session,
     parent_ids: list[str],
-    document_id: str | None = None,
+    document_ids: list[str] | None = None,
 ) -> dict[str, list[dict]]:
     """
     For each selected parent_id, retrieve ALL its children from DB (Step 5.5).
@@ -463,8 +463,8 @@ def expand_parent_chunks(
     """
     stmt = select(DocumentChunk).where(DocumentChunk.parent_id.in_(parent_ids))
 
-    if document_id:
-        stmt = stmt.where(DocumentChunk.document_id == document_id)
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
 
     # sort by chunk_index so siblings are in reading order
     stmt = stmt.order_by(DocumentChunk.chunk_index)

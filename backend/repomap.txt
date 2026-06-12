@@ -1,0 +1,60 @@
++--- .env
++--- .gitignore
++--- app
+|   +--- clients
+|   |   \--- groq_client.py
+|   +--- config
+|   |   \--- settings.py
+|   +--- controllers
+|   |   +--- extract_controller.py
+|   |   \--- rag_controller.py
+|   +--- main.py
+|   +--- memory_store
+|   |   +--- Session1.index
+|   |   +--- Session1.json
+|   |   \--- Session1.txt
+|   +--- models
+|   |   +--- conversation_memory.py
+|   |   +--- conversation_summary.py
+|   |   +--- document.py
+|   |   +--- document_chunk.py
+|   |   +--- extract_model.py
+|   |   +--- rag_model.py
+|   |   +--- session.py
+|   |   +--- session_document.py
+|   |   \--- session_model.py
+|   +--- schemas
+|   |   \--- tools.py
+|   +--- services
+|   |   +--- ai_service.py
+|   |   +--- cache_service.py
+|   |   +--- database.py
+|   |   +--- langchain_rag_service.py
+|   |   +--- llm_service.py
+|   |   +--- memory_service.py
+|   |   +--- pdf_service.py
+|   |   +--- rag_service.py
+|   |   +--- rate_limit.py
+|   |   +--- semantic_cache_service.py
+|   |   \--- vector_search_service.py
+|   +--- utils
+|   |   +--- file_utils.py
+|   |   \--- helpers.py
+|   \--- vector_store
+|       +--- bm25
+|       |   \--- _OceanofPDF.com_Murtagh_-_Christopher_Paolini_30294ee52ac39dfee07e35470d0771070ff0eab0b1d253a6af597905f4effadf_11477197.pkl
+|       +--- indexes
+|       |   \--- d2ee89b3cae11f3d1865d7640510f351aa8dfa38fdb2b9734fcc797a1b90f30c_245886_ankit-dahiya.index
+|       \--- metadata
+|           \--- d2ee89b3cae11f3d1865d7640510f351aa8dfa38fdb2b9734fcc797a1b90f30c_245886_ankit-dahiya.json
++--- backup.txt
++--- repomap.txt
++--- requirements-linux.txt
++--- requirements.txt
++--- scripts
+|   +--- body.json
+|   +--- create_file_import_maps.bat
+|   +--- create_file_tree.py
+|   +--- llamaIndexRag.py
+|   \--- test_pdf.py
+\--- signatures.txt

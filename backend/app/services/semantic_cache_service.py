@@ -2,9 +2,7 @@ import json
 import hashlib
 import numpy as np
 
-from app.services.cache_service import (
-    redis_client
-)
+from app.services.cache_service import redis_client
 
 SEMANTIC_CACHE_THRESHOLD = 0.90
 
@@ -13,85 +11,42 @@ CACHE_TTL = 3600
 
 def normalize_question(question: str):
 
-    return (
-        question
-        .lower()
-        .strip()
-    )
+    return question.lower().strip()
 
 
-def get_exact_cache_key(
-    filename: str,
-    question: str
-):
+def get_exact_cache_key(filename: str, question: str):
 
-    return hashlib.md5(
-        f"{filename}::{question}".encode()
-    ).hexdigest()
+    return hashlib.md5(f"{filename}::{question}".encode()).hexdigest()
 
 
-def get_semantic_cache_key(
-    filename: str,
-    question: str
-):
+def get_semantic_cache_key(filename: str, question: str):
 
-    question_hash = hashlib.md5(
-        question.encode()
-    ).hexdigest()
+    question_hash = hashlib.md5(question.encode()).hexdigest()
 
-    return (
-        f"semantic_cache::{filename}::"
-        f"{question_hash}"
-    )
+    return f"semantic_cache::{filename}::" f"{question_hash}"
 
 
-def get_exact_cache(
-    filename: str,
-    question: str
-):
+def get_exact_cache(filename: str, question: str):
 
-    normalized_question = normalize_question(
-        question
-    )
+    normalized_question = normalize_question(question)
 
-    cache_key = get_exact_cache_key(
-        filename,
-        normalized_question
-    )
+    cache_key = get_exact_cache_key(filename, normalized_question)
 
     return redis_client.get(cache_key)
 
 
-def set_exact_cache(
-    filename: str,
-    question: str,
-    answer: str
-):
+def set_exact_cache(filename: str, question: str, answer: str):
 
-    normalized_question = normalize_question(
-        question
-    )
+    normalized_question = normalize_question(question)
 
-    cache_key = get_exact_cache_key(
-        filename,
-        normalized_question
-    )
+    cache_key = get_exact_cache_key(filename, normalized_question)
 
-    redis_client.setex(
-        cache_key,
-        CACHE_TTL,
-        answer
-    )
+    redis_client.setex(cache_key, CACHE_TTL, answer)
 
 
-def get_semantic_cache(
-    filename: str,
-    query_embedding
-):
+def get_semantic_cache(filename: str, query_embedding):
 
-    semantic_cache_keys = redis_client.keys(
-        f"semantic_cache::{filename}::*"
-    )
+    semantic_cache_keys = redis_client.keys(f"semantic_cache::{filename}::*")
 
     best_similarity = -1
 
@@ -104,19 +59,14 @@ def get_semantic_cache(
         if not cached_item:
             continue
 
-        cached_item = json.loads(
-            cached_item
+        cached_item = json.loads(cached_item)
+
+        cached_embedding = np.array(cached_item["embedding"], dtype="float32").reshape(
+            1, -1
         )
 
-        cached_embedding = np.array(
-            cached_item["embedding"],
-            dtype="float32"
-        ).reshape(1, -1)
-
-        similarity = np.dot(
-            query_embedding,
-            cached_embedding.T
-        )[0][0]
+        query_arr = np.array(query_embedding, dtype="float32").reshape(1, -1)
+        similarity = np.dot(query_arr, cached_embedding.T)[0][0]
 
         if similarity > best_similarity:
 
@@ -133,30 +83,18 @@ def get_semantic_cache(
     return None
 
 
-def set_semantic_cache(
-    filename: str,
-    question: str,
-    embedding,
-    answer: str
-):
+def set_semantic_cache(filename: str, question: str, embedding, answer: str):
 
-    normalized_question = normalize_question(
-        question
-    )
+    normalized_question = normalize_question(question)
 
-    cache_key = get_semantic_cache_key(
-        filename,
-        normalized_question
-    )
+    cache_key = get_semantic_cache_key(filename, normalized_question)
 
     payload = {
         "question": normalized_question,
-        "embedding": embedding[0].tolist(),
-        "answer": answer
+        "embedding": (
+            embedding[0] if isinstance(embedding[0], list) else embedding[0].tolist()
+        ),
+        "answer": answer,
     }
 
-    redis_client.setex(
-        cache_key,
-        CACHE_TTL,
-        json.dumps(payload)
-    )
+    redis_client.setex(cache_key, CACHE_TTL, json.dumps(payload))
