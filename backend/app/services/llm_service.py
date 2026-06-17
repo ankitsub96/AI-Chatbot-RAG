@@ -1,4 +1,5 @@
 import json
+# import openai
 from app.clients.groq_client import client
 from app.config.settings import MODEL
 from app.utils.helpers import timer
@@ -10,6 +11,7 @@ def generate_response(
     tools=None,
     tool_choice=None,
     max_tokens=None,
+# )-> openai.types.chat.ChatCompletion:
 ):
 
     kwargs = {

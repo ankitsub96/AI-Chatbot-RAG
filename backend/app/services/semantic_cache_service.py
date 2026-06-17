@@ -26,7 +26,7 @@ def get_semantic_cache_key(filename: str, question: str):
     return f"semantic_cache::{filename}::" f"{question_hash}"
 
 
-def get_exact_cache(filename: str, question: str):
+def get_exact_cache(filename: str, question: str)-> str | None:
 
     normalized_question = normalize_question(question)
 
@@ -35,7 +35,7 @@ def get_exact_cache(filename: str, question: str):
     return redis_client.get(cache_key)
 
 
-def set_exact_cache(filename: str, question: str, answer: str):
+def set_exact_cache(filename: str, question: str, answer: str)-> None:
 
     normalized_question = normalize_question(question)
 
@@ -44,7 +44,7 @@ def set_exact_cache(filename: str, question: str, answer: str):
     redis_client.setex(cache_key, CACHE_TTL, answer)
 
 
-def get_semantic_cache(filename: str, query_embedding):
+def get_semantic_cache(filename: str, query_embedding)-> str | None:
 
     semantic_cache_keys = redis_client.keys(f"semantic_cache::{filename}::*")
 
@@ -83,7 +83,7 @@ def get_semantic_cache(filename: str, query_embedding):
     return None
 
 
-def set_semantic_cache(filename: str, question: str, embedding, answer: str):
+def set_semantic_cache(filename: str, question: str, embedding, answer: str)->  None:
 
     normalized_question = normalize_question(question)
 

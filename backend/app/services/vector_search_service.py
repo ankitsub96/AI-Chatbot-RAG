@@ -1,5 +1,6 @@
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import func
+import numpy
 from sqlmodel import Session, select
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.config.settings import EMBED_MODEL
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
+from app.models.chunk_types import ChunkDict, HybridResultDict, GroupedParentDict
 from app.utils.helpers import timer
 
 embedding_model = SentenceTransformer(EMBED_MODEL)
@@ -17,7 +19,7 @@ embedding_model = SentenceTransformer(EMBED_MODEL)
 # =====================================================
 
 
-def create_embedding(text: str):
+def create_embedding(text: str)-> numpy.ndarray:
     return embedding_model.encode(
         [text],
         normalize_embeddings=True,
@@ -28,7 +30,7 @@ def create_embeddings(
     texts: list[str],
     batch_size: int = 8,
     show_progress_bar: bool = False,
-):
+)-> numpy.ndarray:
     return embedding_model.encode(
         texts,
         batch_size=batch_size,
@@ -42,7 +44,7 @@ def create_embeddings(
 # =====================================================
 
 
-def _chunk_to_dict(row: DocumentChunk) -> dict:
+def _chunk_to_dict(row: DocumentChunk) -> ChunkDict:
     """Consistent serialization for all search functions."""
     return {
         "id": row.id,
@@ -140,7 +142,7 @@ def hybrid_search(
     top_k: int = 10,
     vector_weight: float = 0.6,
     keyword_weight: float = 0.4,
-):
+)-> list[HybridResultDict]:
     print("hybrid_search::")
 
     @timer
@@ -397,7 +399,7 @@ def _keyword_document_search(
 # =====================================================
 
 
-def group_chunks_by_parent(results: list[dict]) -> dict[str, dict]:
+def group_chunks_by_parent(results: list[dict]) -> dict[str, GroupedParentDict]:
     """
     Group child chunk results by parent_id.
 
@@ -435,7 +437,7 @@ def group_chunks_by_parent(results: list[dict]) -> dict[str, dict]:
 def select_top_parents(
     grouped: dict[str, dict],
     top_n: int,
-) -> list[dict]:
+) -> list[GroupedParentDict]:
     """
     Select top N parents ranked by their max child score (Step 5.4).
     """

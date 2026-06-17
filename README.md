@@ -1,721 +1,430 @@
-# AI Support Ticket + Conversational RAG API
+# RAG Document Assistant — Backend
 
-A production-style FastAPI backend for AI-powered support ticket extraction and conversational document Q&A — featuring session-scoped document management, PostgreSQL + pgvector storage, parent-child chunking, hybrid BM25 + dense retrieval, multi-query expansion with RRF reranking, LLM thinking traces, and a multi-theme React frontend.
+A conversational Retrieval-Augmented Generation (RAG) system for querying PDF
+documents, with four interchangeable agentic strategies layered on top of a
+shared hybrid retrieval pipeline.
 
 ---
 
 ## Table of Contents
 
 - [Features](#features)
-- [Stack](#stack)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
+- [Tech Stack](#tech-stack)
+- [Setup](#setup)
+- [Environment Variables](#environment-variables)
+- [Running the Server](#running-the-server)
 - [API Reference](#api-reference)
-- [Caching Architecture](#caching-architecture)
-- [Conversational Memory](#conversational-memory)
-- [Memory Summarization](#memory-summarization)
-- [Session Management](#session-management)
-- [Semantic Session Search](#semantic-session-search)
-- [Retrieval Pipeline](#retrieval-pipeline)
-- [Async Indexing](#async-indexing)
-- [Background Tasks](#background-tasks)
-- [Why PostgreSQL + pgvector](#why-postgresql--pgvector)
-- [Why SentenceTransformers](#why-sentencetransformers)
-- [Why a Centralized LLM Service](#why-a-centralized-llm-service)
-- [Scalability](#scalability)
-- [Future Improvements](#future-improvements)
-- [License](#license)
+  - [Upload & Documents](#upload--documents)
+  - [Sessions](#sessions)
+  - [Ask — Plain RAG](#ask--plain-rag)
+  - [Ask — LangChain RAG](#ask--langchain-rag)
+  - [Ask — Agentic RAG](#ask--agentic-rag)
+  - [Ask — Research Agents](#ask--research-agents)
+- [Choosing an Endpoint](#choosing-an-endpoint)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
 
 ---
 
 ## Features
 
-### Support Ticket Extraction
-
-Extracts structured data from unstructured support text — tickets, emails, bug reports.
-
-**Output fields:**
-
-| Field | Description |
-|---|---|
-| `intent` | Detected intent of the request |
-| `entities` | Key entities mentioned |
-| `priority_score` | Numeric urgency score (0–10) |
-| `suggested_action` | Recommended next step |
-
-Powered by Groq LLM with function/tool calling, Redis exact cache, and semantic cache.
-
----
-
-### Conversational PDF RAG
-
-Upload PDFs and query them conversationally with full session continuity.
-
-- Session-scoped document ownership via `Session → SessionDocument → Document → DocumentChunk`
-- SHA-256 checksum deduplication — re-uploading an identical file reuses existing chunks and embeddings
-- Async document indexing via background tasks
+- PDF upload with SHA-256 deduplication — re-uploading an identical file never re-embeds it
 - Parent-child chunking for context-aware retrieval
-- Hybrid BM25 + pgvector dense retrieval per query
-- Multi-query expansion with LLM-generated variants; results merged via Reciprocal Rank Fusion (RRF)
-- LLM thinking traces streamed as SSE events alongside answer tokens
-- Session-based long-term memory with rolling summarization
+- Hybrid retrieval: pgvector dense search + PostgreSQL full-text (BM25) search, merged via Reciprocal Rank Fusion
+- Multi-query expansion to reduce retrieval blind spots
+- Two-layer caching: Redis exact-match + pgvector semantic-match
+- PostgreSQL + pgvector conversational memory with rolling summarization (migrated from local FAISS)
+- Four agentic strategies sharing one tool layer — zero duplicated retrieval/generation/evaluation code:
+  - Single-pass agentic RAG with confidence-based retry
+  - **ReAct** — iterative reason → act → respond loop
+  - **Planner** — upfront decomposition, parallel sub-question execution
+  - **Hybrid Research** — upfront decomposition + parallel ReAct loop per sub-question
+- Optional live web search (DuckDuckGo, no API key) for the three research agents
+- Configurable strictness (`strict` / `balanced` / `creative`) controlling how much the LLM may infer beyond retrieved context
+- Server-Sent Events streaming with structured reasoning traces for every agentic endpoint
+- Session-scoped document management with orphan cleanup
 
 ---
 
-### Centralized LLM Service
-
-All LLM invocations route through a single `llm_service.py`.
-
-- Single Groq client initialization at startup
-- Model name loaded once from environment
-- Exposes `generate_response()` and `generate_tool_response()`
-- Decouples LLM provider from all business logic
-- Simplifies retries, logging, and provider swapping
-
----
-
-### Long-Term Vector Memory
-
-Every session maintains a persistent FAISS memory store on disk.
-
-- Each conversation turn is embedded and added to the session index
-- Semantic retrieval injects only relevant memories into prompts
-- Memory grows with the conversation, bounded by summarization
-
----
-
-### Memory Summarization
-
-When a session's memory exceeds the configured threshold, older entries are compressed by the LLM into a rolling summary, keeping prompt sizes bounded as conversations grow.
-
----
-
-### Multi-Theme React Frontend
-
-A full chat UI served alongside the API.
-
-- 5 CSS variable themes: Void, Terminal, Ember, Arctic, Noir — persisted in localStorage
-- ThinkingDrawer: collapsible panel showing live LLM reasoning steps, auto-opens on stream
-- Session sidebar with custom session naming and drag-and-drop PDF upload
-- Document selection scoped to the active session via `session_id + document_id`
-
----
-
-## Stack
+## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI, Uvicorn |
-| Frontend | React, Vite |
-| LLM | Groq API (`llama-3.3-70b-versatile`) |
-| LLM Abstraction | `app/services/llm_service.py` |
-| Embeddings | Sentence Transformers — `BAAI/bge-base-en-v1.5` |
-| Document + Memory Vectors | PostgreSQL + pgvector |
-| Full-Text Search | PostgreSQL full-text search (BM25) |
-| Caching | Redis (exact) + pgvector embeddings (semantic) |
-| Rate Limiting | SlowAPI (5 req/min) |
-| Async Processing | `asyncio.gather()`, `asyncio.to_thread()` |
-| Background Tasks | FastAPI `BackgroundTasks` |
-| Containerization | Docker, Docker Compose |
+| API framework | FastAPI |
+| Agent orchestration | LangGraph |
+| LLM provider | Groq |
+| Embeddings | BAAI/bge-base-en-v1.5 (SentenceTransformers) |
+| Document + memory storage | PostgreSQL + pgvector |
+| Exact/semantic cache | Redis |
+| Web search (research agents) | DuckDuckGo (`duckduckgo-search`) |
+| PDF parsing | PyMuPDF |
+| Rate limiting | SlowAPI |
+
+---
+
+## Setup
+
+```bash
+git clone <repo-url>
+cd backend
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+PostgreSQL must have the `pgvector` extension enabled:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Redis must be running and reachable at `REDIS_HOST`/`REDIS_PORT`.
+
+---
+
+## Environment Variables
+
+Create a `.env` file in the backend root:
+
+```env
+GROQ_API_KEY=your_groq_key
+MODEL=llama-3.3-70b-versatile
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+POSTGRES_DB=rag_db
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+```
+
+Additional tunables live in `app/config/settings.py` (not environment-driven):
+
+| Setting | Default | Affects |
+|---|---|---|
+| `TOP_K` | 30 | Chunks retrieved per hybrid search call |
+| `CHUNK_SIZE` | 400 | Token size per child chunk |
+| `MAX_RETRIES` | 2 | Retry cap for `/rag/ask/agent`'s evaluation loop |
+| `CONFIDENCE_THRESHOLD` | 7 | Minimum confidence (0–10) before accepting an answer without retry |
+| `REACT_MAX_ITERATIONS` | 5 | Hard cap on the ReAct loop — applies per-run for `/rag/react/ask`, per-step for `/rag/research/ask` |
+| `PLANNER_MAX_STEPS` | 5 | Maximum sub-questions generated by the planner |
+| `WEB_SEARCH_MAX_RESULTS` | 5 | DuckDuckGo results requested per web search call |
+
+---
+
+## Running the Server
+
+```bash
+uvicorn app.main:app --reload
+```
+
+API docs available at `http://localhost:8000/docs`.
+
+---
+
+## API Reference
+
+### Upload & Documents
+
+#### `POST /rag/upload`
+
+Upload a PDF and link it to a session. Identical files (by SHA-256) are deduplicated automatically.
+
+```bash
+curl -X POST "http://localhost:8000/rag/upload?session_id=<uuid>" \
+  -F "file=@document.pdf"
+```
+
+```json
+{
+  "message": "File uploaded, indexing started",
+  "status": "processing",
+  "original_filename": "document.pdf",
+  "stored_filename": "document_a1b2c3d4_204800.pdf",
+  "document_id": "...",
+  "reused": false
+}
+```
+
+#### `GET /rag/documents`
+
+List all documents with `status = ready` across all sessions.
+
+#### `GET /rag/sessions/{session_id}/documents`
+
+List documents linked to a specific session, including non-ready ones.
+
+#### `DELETE /rag/sessions/{session_id}/documents/{document_id}`
+
+Unlink a document from a session. Triggers orphan cleanup if no other session references it.
+
+#### `POST /rag/admin/cleanup`
+
+Manually trigger orphan document cleanup (documents with zero session links).
+
+---
+
+### Sessions
+
+#### `POST /rag/sessions`
+
+```json
+{ "title": "Optional session name" }
+```
+
+#### `GET /rag/sessions`
+
+Returns all sessions.
+
+#### `GET /rag/sessions/{session_id}?page=1&page_size=20`
+
+Returns paginated conversation history. Each item includes:
+
+```json
+{
+  "question": "...",
+  "answer": "...",
+  "thoughts": [ { "node": "...", "message": "...", "data": {...}, "ts": 0 } ],
+  "created_at": "..."
+}
+```
+
+`thoughts` is populated only for turns produced by an agentic endpoint
+(`/rag/ask/agent`, `/rag/react/ask`, `/rag/planner/ask`, `/rag/research/ask`);
+it is `null` for turns from `/rag/ask` and `/rag/ask/langchain`.
+
+#### `DELETE /rag/sessions/{session_id}`
+
+Deletes the session, its memory, and unlinks its documents (background task).
+
+#### `POST /rag/sessions/{session_id}/search`
+
+```json
+{ "query": "what did we discuss about pricing" }
+```
+
+Semantic search over the session's own conversation history.
+
+---
+
+### Ask — Plain RAG
+
+#### `POST /rag/ask`
+
+Synchronous, non-streaming. Two-layer cache → query expansion → hybrid retrieval → parent expansion → memory injection → single LLM call.
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "question": "What databases does this project use?",
+  "document_ids": null
+}
+```
+
+```json
+{ "answer": "..." }
+```
+
+No `stream` field — this endpoint never streams. No reasoning trace is persisted for this endpoint's turns.
+
+---
+
+### Ask — LangChain RAG
+
+#### `POST /rag/ask/langchain?stream=true`
+
+Same retrieval pipeline as `/rag/ask`, built with LangChain primitives. Supports streaming via the `stream` query parameter.
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "question": "...",
+  "document_ids": null
+}
+```
+
+When `stream=true`, returns `text/event-stream` with legacy-shaped events:
+
+```
+data: {"thinking": "stage_name", "message": "..."}
+
+data: {"token": "..."}
+
+data: {"done": true}
+```
+
+No reasoning trace is persisted for this endpoint's turns.
+
+---
+
+### Ask — Agentic RAG
+
+#### `POST /rag/ask/agent`
+
+Single-pass LangGraph agent: cache check → memory retrieval → query expansion → hybrid retrieval → parent expansion → answer generation → groundedness evaluation → retry-or-return (bounded by `MAX_RETRIES`).
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "question": "...",
+  "document_ids": null,
+  "stream": true
+}
+```
+
+When `stream=true`, returns `text/event-stream`:
+
+```
+event: thinking
+data: {"type": "thinking", "stage": "cache_check", "message": "...", "data": {}}
+
+event: response
+data: {"type": "response", "token": "..."}
+
+event: done
+data: {"type": "done"}
+```
+
+Reasoning trace is persisted to `conversation_memories.thoughts` for this endpoint's turns.
+
+---
+
+### Ask — Research Agents
+
+Three additional LangGraph agents, all sharing the same request/response shape
+and SSE format as `/rag/ask/agent`, differing only in internal strategy.
+
+#### Common Request Body
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "question": "How do Redis caching and pgvector retrieval interact in this system?",
+  "document_ids": null,
+  "stream": true,
+  "use_web": false,
+  "strictness": "balanced"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `document_ids` | `list[str] \| null` | `null` resolves to all documents linked to the session |
+| `stream` | `bool` | Defaults to `true` |
+| `use_web` | `bool` | Defaults to `false`. Enables the DuckDuckGo `web_search` tool |
+| `strictness` | `"strict" \| "balanced" \| "creative"` | Defaults to `"balanced"` — see below |
+
+**Strictness levels:**
+
+| Level | Behavior |
+|---|---|
+| `strict` | Answer only from retrieved document context; no inference beyond it |
+| `balanced` | Prefer document context; may connect ideas using general knowledge |
+| `creative` | Use document context and general knowledge freely |
+
+#### `POST /rag/react/ask`
+
+Iterative agent. On each iteration, the LLM picks one tool (`document_search`,
+`query_expander`, or `web_search` if `use_web`) or signals it's ready to
+answer. Loops up to `REACT_MAX_ITERATIONS` times, then generates an answer,
+evaluates it for groundedness, and retries the loop if confidence is below
+`CONFIDENCE_THRESHOLD`.
+
+Best for: open-ended questions where the right search strategy isn't known upfront.
+
+#### `POST /rag/planner/ask`
+
+Decomposes the question into up to `PLANNER_MAX_STEPS` independent
+sub-questions upfront, searches and answers all of them in parallel, then
+synthesizes one final answer from all sub-answers.
+
+Best for: multi-part questions where the sub-questions are independent
+(e.g. "compare X and Y", "list the steps and their tradeoffs").
+
+#### `POST /rag/research/ask`
+
+Combines both strategies: decomposes the question like Planner, then runs a
+full ReAct loop (reason → act → respond, capped at `REACT_MAX_ITERATIONS` per
+step) independently and in parallel for each sub-question, then synthesizes.
+
+Best for: multi-part questions where each part also needs its own iterative
+search refinement — the most thorough and highest-latency option.
+
+#### Response Shape (all three)
+
+```json
+{ "answer": "..." }
+```
+
+or, when `stream=true`, the same `text/event-stream` shape as `/rag/ask/agent`,
+with additional `stage` values specific to each strategy (e.g. `plan_creation`,
+`reason`, `act`, `search_parallel`, `synthesize`, `evaluate`).
+
+---
+
+## Choosing an Endpoint
+
+| Endpoint | Latency | Best for |
+|---|---|---|
+| `/rag/ask` | Fastest (~1-3s, cache hits near-instant) | Simple, direct questions |
+| `/rag/ask/langchain` | Same pipeline, LangChain-flavored | Equivalent to `/rag/ask`, different implementation |
+| `/rag/ask/agent` | Moderate (~3-8s) | Questions needing a groundedness check and retry |
+| `/rag/react/ask` | Moderate-high (~6-15s) | Questions where the search strategy should adapt as evidence comes in |
+| `/rag/planner/ask` | Moderate-high (~8-15s) | Multi-part questions with independent sub-questions |
+| `/rag/research/ask` | Highest (~12-25s) | Multi-part questions needing both decomposition and adaptive search per part |
+
+All six endpoints share the same underlying hybrid retrieval pipeline
+(`vector_search_service.py`) and memory system (`memory_service.py`) — none of
+them re-implement retrieval, embedding, or memory logic independently.
+
+---
+
+## Architecture
+
+Full system design, data model, and subsystem-by-subsystem breakdown (including
+the shared tool layer, shared graph nodes, and per-agent LangGraph wiring) is in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
 ## Project Structure
 
 ```
-.
-├── .env
-├── .gitignore
-├── requirements.txt
-├── requirements-linux.txt
-│
-└── app/
-    ├── main.py
-    │
-    ├── clients/
-    │   └── groq_client.py              # Groq SDK client initialization
-    │
-    ├── config/
-    │   └── settings.py                 # Environment config, chunk sizes, thresholds
-    │
-    ├── controllers/
-    │   ├── rag_controller.py           # RAG + session HTTP handlers
-    │   └── extract_controller.py       # Ticket extraction HTTP handlers
-    │
-    ├── models/                         # SQLAlchemy ORM models
-    │   ├── session.py                  # Session (UUID PK, name, created_at)
-    │   ├── session_document.py         # SessionDocument join table
-    │   ├── document.py                 # Document (UUID PK, checksum, status)
-    │   ├── document_chunk.py           # DocumentChunk (parent_id, child_id, pgvector embedding)
-    │   ├── conversation_memory.py      # ConversationMemory (per-turn vector + metadata)
-    │   ├── conversation_summary.py     # ConversationSummary (rolling LLM summary)
-    │   ├── extract_model.py            # Pydantic extraction request/response models
-    │   ├── rag_model.py                # Pydantic RAG request/response models
-    │   └── session_model.py            # Pydantic session models
-    │
-    ├── schemas/
-    │   └── tools.py                    # Groq tool/function call schemas
-    │
-    ├── services/
-    │   ├── database.py                 # PostgreSQL connection setup and session factory
-    │   ├── llm_service.py              # Centralized Groq client + generation methods
-    │   ├── ai_service.py               # Embedding model initialization and inference
-    │   ├── rag_service.py              # Core RAG orchestration (chunking, ingestion, retrieval)
-    │   ├── langchain_rag_service.py    # LangChain-based retrieval pipeline variant
-    │   ├── vector_search_service.py    # pgvector similarity search + BM25 full-text search
-    │   ├── memory_service.py           # Long-term FAISS memory + rolling summarization
-    │   ├── pdf_service.py              # PDF text extraction via PyMuPDF
-    │   ├── semantic_cache_service.py   # Embedding-based semantic cache layer
-    │   ├── cache_service.py            # Redis exact cache logic
-    │   └── rate_limit.py               # SlowAPI rate limiter setup
-    │
-    ├── utils/
-    │   ├── file_utils.py               # File I/O helpers
-    │   └── helpers.py                  # Shared utility functions
-    │
-    ├── vector_store/
-    │   ├── indexes/                    # Legacy FAISS IndexHNSWFlat files (pre-migration)
-    │   ├── metadata/                   # Legacy chunk metadata JSON (pre-migration)
-    │   └── bm25/                       # Legacy BM25 pickle indexes (pre-migration)
-    │
-    └── memory_store/                   # Per-session FAISS index + metadata + summary
+app/
+├── config/
+│   └── settings.py                 # All tunables (TOP_K, MAX_RETRIES, REACT_MAX_ITERATIONS, ...)
+├── controllers/
+│   └── rag_controller.py           # All HTTP routes
+├── models/
+│   ├── document.py
+│   ├── document_chunk.py
+│   ├── session_document.py
+│   ├── rag_model.py                 # Pydantic request models (incl. ResearchAskRequest)
+│   ├── chunk_types.py               # Shared TypedDicts: ChunkDict, ToolResult subtypes, etc.
+│   └── agent_states.py              # LangGraph state TypedDicts: ReactState, PlannerState, HybridState, StepState
+├── services/
+│   ├── llm_service.py                # Centralized Groq client + generate_response + expand_query_sync
+│   ├── vector_search_service.py      # Hybrid retrieval, parent expansion, chunk-to-dict serialization
+│   ├── memory_service.py             # PostgreSQL + pgvector conversational memory and summarization
+│   ├── semantic_cache_service.py     # Redis exact + semantic cache
+│   ├── rag_service.py                # Plain /rag/ask pipeline
+│   ├── langchain_rag_service.py      # /rag/ask/langchain pipeline
+│   ├── agentic_rag_service.py        # /rag/ask/agent — single-pass agentic RAG
+│   ├── research_tools.py             # 9 shared pure tool functions + run_tools_parallel
+│   ├── shared_rag_nodes.py           # Every LangGraph node used by the 4 agentic endpoints
+│   ├── react_rag_service.py          # /rag/react/ask — graph wiring + entry point only
+│   ├── planner_rag_service.py        # /rag/planner/ask — graph wiring + entry point only
+│   └── hybrid_rag_service.py         # /rag/research/ask — graph + subgraph wiring + entry point only
+└── utils/
+    └── helpers.py                    # format_sse, thinking, token_event, done_event, timer, rag_thought, rag_cache_key
 ```
 
----
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.9+
-- PostgreSQL with pgvector extension
-- Redis
-- [Groq API key](https://console.groq.com)
-
-### Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-GROQ_API_KEY=your_key
-MODEL=llama-3.3-70b-versatile
-
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-DATABASE_URL=postgresql://user:password@localhost:5432/ragdb
-```
-
-### Run with Docker Compose
-
-```bash
-docker compose up
-```
-
-This starts PostgreSQL (with pgvector), Redis, and the FastAPI server together.
-
-### Run Manually
-
-```bash
-# Start dependencies
-docker run -p 6379:6379 redis
-docker run -e POSTGRES_PASSWORD=password -p 5432:5432 ankane/pgvector
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the server
-uvicorn app.main:app --reload
-```
-
-Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
----
-
-## API Reference
-
-### Health
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Health check |
-
-```json
-{ "message": "FastAPI working!" }
-```
-
----
-
-### Support Ticket Extraction
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/extract` | Extract structured data from one or more support texts |
-
-**Request:**
-
-```json
-{
-  "texts": [
-    "Payment dashboard crashing in production",
-    "Need refund for duplicate billing"
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "cached": false,
-  "data": [
-    {
-      "intent": "Production crash",
-      "entities": ["payment dashboard"],
-      "priority_score": 10,
-      "suggested_action": "Immediate production investigation"
-    }
-  ]
-}
-```
-
----
-
-### Session Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/rag/sessions` | Create a new session with an optional custom name |
-| `GET` | `/rag/sessions` | List all sessions |
-| `GET` | `/rag/session/{session_id}` | Paginated conversation history for a session |
-| `DELETE` | `/rag/session/{session_id}` | Delete session and all associated state |
-| `POST` | `/rag/session/search` | Semantic search over a session's memory |
-
-**Create session request:**
-
-```json
-{ "name": "Q4 Financial Review" }
-```
-
-**Create session response:**
-
-```json
-{ "session_id": "a1b2c3d4-...", "name": "Q4 Financial Review" }
-```
-
----
-
-### Document Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/rag/upload` | Upload a PDF; associates it with a session |
-| `GET` | `/rag/sessions/{session_id}/documents` | List documents linked to a session |
-| `DELETE` | `/rag/sessions/{session_id}/documents/{document_id}` | Unlink a document from a session |
-| `POST` | `/rag/ask` | Ask a question against one or more session documents |
-
-**Upload request:** `multipart/form-data` with `file` + `session_id`
-
-**Upload response:**
-
-```json
-{
-  "document_id": "f9e8d7c6-...",
-  "status": "processing",
-  "deduplicated": false
-}
-```
-
-If an identical file (same SHA-256) was previously uploaded, `deduplicated: true` is returned and existing chunks are reused — no re-embedding occurs.
-
-**Ask request:**
-
-```json
-{
-  "session_id": "a1b2c3d4-...",
-  "document_ids": ["f9e8d7c6-..."],
-  "question": "What backend technologies does he know?",
-  "stream": true
-}
-```
-
-**Ask response (streaming SSE):**
-
-```
-event: thinking
-data: {"step": "Expanding query into 3 variants..."}
-
-event: thinking
-data: {"step": "Running hybrid retrieval across expanded queries..."}
-
-event: token
-data: {"token": "The document mentions FastAPI"}
-
-event: token
-data: {"token": ", Redis, and pgvector..."}
-
-event: done
-data: {}
-```
-
----
-
-### Legacy Document Endpoints (filename-based, deprecated)
-
-The original `filename`-based `/rag/ask` and `/rag/documents` endpoints remain available for backward compatibility but are superseded by the session-scoped API above.
-
----
-
-## Caching Architecture
-
-Two cache layers sit in front of every LLM call.
-
-### Layer 1 — Redis Exact Cache
-
-```
-key = md5(document_ids + question)
-    ├─ HIT  → return immediately (~0ms)
-    └─ MISS → continue to semantic cache
-```
-
-### Layer 2 — Semantic Cache
-
-```
-Embed question
-    ↓
-pgvector cosine similarity search over cached questions
-    ├─ similarity ≥ threshold → return stored answer (~5–15ms)
-    └─ below threshold → LLM call (~800–2000ms)
-```
-
-Both cache writes happen asynchronously via `BackgroundTasks` after the response is returned.
-
-**Example semantic hits:**
-
-| Incoming | Cached Hit |
-|---|---|
-| `"What databases does he know?"` | `"Which DB technologies are mentioned?"` |
-| `"Summarize his work experience"` | `"What jobs has he had?"` |
-
----
-
-## Conversational Memory
-
-Each session has a dedicated FAISS index that persists across server restarts.
-
-### Memory Files (per session)
-
-```
-memory_store/
-    <session_id>.index          # FAISS IndexFlatIP (exact cosine similarity)
-    <session_id>.json           # Metadata: question, answer, timestamp per turn
-    <session_id>.txt            # LLM-generated rolling summary of older turns
-```
-
-### Memory Write Flow
-
-```
-User question + LLM answer
-    ↓
-Embed (question + answer) with SentenceTransformers
-    ↓
-Add vector to session IndexFlatIP
-    ↓
-Append metadata entry to session JSON
-    ↓
-Persist both to disk (background task)
-```
-
-### Memory Read Flow
-
-```
-Incoming question
-    ↓
-Embed question
-    ↓
-Cosine similarity search over session FAISS index
-    ↓
-Retrieve top-K relevant prior turns
-    ↓
-Inject into prompt alongside document chunks and rolling summary
-```
-
-`IndexFlatIP` with L2-normalized vectors gives exact cosine similarity — appropriate for per-session memory stores where index size remains manageable and precision is preferred over approximation.
-
----
-
-## Memory Summarization
-
-Long sessions are compressed to prevent unbounded context window growth.
-
-### Trigger
-
-```python
-if len(memories) > SUMMARY_TRIGGER:
-    summarize_older_memories(session_id)
-```
-
-### Summarization Flow
-
-```
-All memories in session
-    ↓
-Split: older entries | RECENT_HISTORY (most recent N turns)
-    ↓
-Older entries → LLM summarization call (via llm_service.py)
-    ↓
-Summary written to: memory_store/<session_id>.txt
-    ↓
-Recent turns retained in FAISS index unchanged
-```
-
-### Prompt Injection Order
-
-```
-1. System instructions
-2. Rolling summary       ← distilled context from older turns
-3. Retrieved memories    ← semantically relevant recent turns
-4. Document chunks       ← relevant PDF sections (parent-expanded)
-5. Current question
-```
-
-### Benefits
-
-| Property | Effect |
-|---|---|
-| Bounded context | Prompt size stays predictable regardless of session length |
-| Distilled recall | Key facts preserved without full history |
-| Persistence | Summary survives server restarts |
-| Scalability | Enables arbitrarily long conversations |
-
----
-
-## Session Management
-
-Sessions are created explicitly via `POST /rag/sessions` and carry a UUID primary key. Each session owns its linked documents (via `SessionDocument`), FAISS memory index, and optional summary file.
-
-- **Create** with a custom name via `POST /rag/sessions`
-- **List** all active sessions via `GET /rag/sessions`
-- **Browse** paginated history via `GET /rag/session/{session_id}`
-- **Delete** all session state via `DELETE /rag/session/{session_id}` — removes the DB rows, FAISS index, JSON metadata, and summary file; orphaned documents with no remaining session links are cleaned up automatically
-- **Search** prior turns semantically via `POST /rag/session/search`
-
----
-
-## Semantic Session Search
-
-Users can retrieve relevant prior conversation turns by meaning, not keyword.
-
-```
-POST /rag/session/search
-
-Query: "What did we discuss about caching?"
-    ↓
-Embed query with BAAI/bge-base-en-v1.5
-    ↓
-Cosine similarity search over session FAISS index
-    ↓
-Return top-K matching conversation turns
-```
-
-This enables accurate recall even when the user cannot remember exact prior phrasing — useful for long research sessions or multi-day workflows.
-
----
-
-## Retrieval Pipeline
-
-### Parent-Child Chunking
-
-Documents are indexed at two granularities:
-
-- **Child chunks** — small, precise units used for embedding and retrieval
-- **Parent chunks** — larger surrounding context expanded and passed to the LLM
-
-When a child chunk is retrieved, its parent is resolved and the full parent block is included in the prompt, giving the LLM broader context without embedding noise from large chunks.
-
-### Hybrid Retrieval
-
-Each query runs two searches in parallel:
-
-```
-Query
-    ├── pgvector ANN search (dense semantic similarity)
-    └── PostgreSQL full-text search (BM25 keyword matching)
-        ↓
-Results merged by score
-```
-
-### Multi-Query Expansion + RRF
-
-```
-Original question
-    ↓
-LLM generates N expanded query variants (preserving intent)
-    ↓
-Each variant: embed → hybrid retrieval (parallel asyncio)
-    ↓
-All result sets merged via Reciprocal Rank Fusion (RRF)
-    ↓
-Deduplicate chunks → resolve parent blocks → build LLM context
-```
-
-RRF rewards chunks that rank consistently well across multiple query variants, improving recall for ambiguous or complex questions.
-
----
-
-## Async Indexing
-
-PDF uploads return immediately. All indexing happens as a background task.
-
-```
-POST /rag/upload
-    ↓
-Compute SHA-256 checksum
-    ├─ Match found → reuse existing Document + chunks, return deduplicated: true
-    └─ No match ↓
-Save PDF to uploads/
-    ↓
-Return { "status": "processing" }  ← immediate response
-
-    ↓ (background)
-Extract text via PyMuPDF
-    ↓
-Parent-child chunker
-    ↓
-Embed child chunks with BAAI/bge-base-en-v1.5
-    ↓
-Store chunks + embeddings in PostgreSQL (pgvector)
-    ↓
-Update Document.status = "ready"
-```
-
-`GET /rag/sessions/{session_id}/documents` returns only documents with `status = ready`.
-
----
-
-## Background Tasks
-
-The following operations run via FastAPI `BackgroundTasks` after the HTTP response is returned to the client:
-
-| Task | Trigger |
-|---|---|
-| Exact cache write (Redis) | After every LLM response |
-| Semantic cache write (pgvector) | After every LLM response |
-| Memory persistence (FAISS + JSON) | After each conversation turn |
-| Memory summarization | When session memory exceeds `SUMMARY_TRIGGER` |
-| Document ingestion (embed + store) | After PDF upload |
-
----
-
-## Why PostgreSQL + pgvector
-
-The system originally used FAISS indexes and a local filesystem for document vector storage. This was replaced with PostgreSQL + pgvector to enable:
-
-| Capability | Local FAISS (before) | PostgreSQL + pgvector (now) |
-|---|---|---|
-| Multi-worker sharing | Not possible (in-process) | Native (shared DB) |
-| Hybrid BM25 + dense search | Separate BM25 pickle files | Single query via `tsvector` + `pgvector` |
-| Document deduplication | Not supported | SHA-256 checksum column |
-| Session-scoped filtering | Filename prefix hacks | `document_id` FK with proper joins |
-| Cascade deletes | Manual file cleanup | DB-level ON DELETE CASCADE |
-| Persistence guarantees | Background file writes | ACID transactions |
-
-FAISS `IndexFlatIP` is still used for per-session conversation memory, where the index is small, bounded, and does not need to be shared across workers.
-
----
-
-## Why SentenceTransformers
-
-`BAAI/bge-base-en-v1.5` is used as the single embedding model across every subsystem:
-
-| Subsystem | Use |
-|---|---|
-| PDF chunk embeddings | Semantic document retrieval |
-| Query expansion embeddings | Multi-query parallel retrieval |
-| Semantic cache | Question similarity matching |
-| Conversation memory | Turn-level semantic search |
-
-Using one model across all subsystems ensures vectors from different contexts live in the same semantic space — enabling meaningful comparisons across document chunks, cached questions, and memory entries without remapping.
-
----
-
-## Why a Centralized LLM Service
-
-Previously, Groq client initialization was duplicated across multiple service files.
-
-**Before:**
-
-```
-extract_service.py  → owns Groq client
-rag_service.py      → owns Groq client
-memory_service.py   → owns Groq client
-```
-
-**After:**
-
-```
-extract_service.py  ─┐
-rag_service.py       ├──→ llm_service.py → Groq API
-memory_service.py   ─┘
-```
-
-**Benefits:**
-
-| Concern | Before | After |
-|---|---|---|
-| Model config | Duplicated in N files | One env var, one place |
-| Retry logic | Must add to each service | Add once in `llm_service.py` |
-| Logging/tracing | Scattered | Centralized |
-| Provider swap | Edit N files | Edit one file |
-| Unit testing | Mock N clients | Mock one interface |
-
----
-
-## Scalability
-
-### Current Design (Single Node)
-
-| Component | Current Constraint |
-|---|---|
-| pgvector | Single PostgreSQL instance |
-| Redis cache | Single instance |
-| Memory store | Local FAISS filesystem |
-| Embeddings | CPU inference |
-| LLM | Groq API (rate-limited) |
-
-### Scaling Path
-
-| Bottleneck | Recommended Solution |
-|---|---|
-| PostgreSQL single-node | Read replicas or migrate vector search to Qdrant / Pinecone |
-| Redis single instance | Redis Cluster or Redis Sentinel |
-| CPU embeddings | GPU inference server or hosted embedding API |
-| LLM rate limits | Multiple API keys or OpenAI fallback via `llm_service.py` |
-| FAISS memory store | Migrate to pgvector (same DB, already available) |
-| Single FastAPI process | Gunicorn multi-worker — pgvector is safely shared, unlike FAISS |
-| Background tasks | Celery + Redis or RabbitMQ broker |
-
-The centralized `llm_service.py` and modular service layer keep most of these migrations localized to a single file or service.
-
----
-
-## Future Improvements
-
-- [x] Hybrid retrieval (BM25 + dense vectors)
-- [x] Streaming LLM responses (SSE)
-- [x] Multi-document retrieval across files in one query
-- [x] Postgres persistence for metadata and memory
-- [ ] Cross-encoder reranking
-- [ ] Multi-user authentication (JWT / OAuth2)
-- [ ] Celery distributed background workers
-- [ ] Memory importance scoring and pruning
-- [ ] GPU-accelerated embeddings
-- [ ] Metadata filtering on retrieval
-- [ ] Async Redis client (`aioredis`)
-- [ ] Memory summarization quality evaluation
-
----
-
-## License
-
-MIT
+**Adding a new agentic strategy:** write tools in `research_tools.py` only if
+genuinely new; otherwise reuse the existing 9. Write any new nodes in
+`shared_rag_nodes.py`. The new service file should contain only a state
+TypedDict (in `agent_states.py`), `StateGraph` construction referencing
+existing or new shared nodes, and a `run_*_agent` entry point matching the
+`stream: bool` → `str | AsyncGenerator[str, None]` signature used by the other
+four.

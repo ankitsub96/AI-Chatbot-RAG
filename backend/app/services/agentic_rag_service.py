@@ -30,7 +30,7 @@ from app.services.semantic_cache_service import (
     set_exact_cache,
     set_semantic_cache,
 )
-from app.utils.helpers import format_sse, token_event, done_event, timer
+from app.utils.helpers import format_sse, token_event, done_event, timer, _thought,_parse_memory_to_messages
 from app.config.settings import TOP_K, MAX_RETRIES, CONFIDENCE_THRESHOLD
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk
@@ -64,32 +64,6 @@ class AgentState(TypedDict):
 # =====================================================
 # HELPERS
 # =====================================================
-
-
-def _thought(node: str, message: str, data: dict | None = None) -> dict:
-    return {"node": node, "message": message, "data": data, "ts": time.time()}
-
-
-def _parse_memory_to_messages(memory_context: str) -> list[dict]:
-    if not memory_context.strip():
-        return []
-
-    messages = []
-    blocks = memory_context.split("USER:")
-    for block in blocks:
-        if not block.strip():
-            continue
-        if "A:" in block:
-            parts = block.split("A:")
-            human_text = parts[0].strip()
-            ai_text = parts[1].strip() if len(parts) > 1 else ""
-            if human_text:
-                messages.append({"type": "human", "content": human_text})
-            if ai_text:
-                messages.append({"type": "ai", "content": ai_text})
-        else:
-            messages.append({"type": "human", "content": block.strip()})
-    return messages
 
 
 # =====================================================

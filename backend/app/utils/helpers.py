@@ -6,6 +6,8 @@ from collections import defaultdict
 import threading
 import json
 
+from app.models.rag_model import MemoryMessage
+
 _lock = threading.Lock()
 _active_counts = defaultdict(int)
 
@@ -71,7 +73,7 @@ def format_sse(data: str, event: str = "message") -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def thinking(stage: str, message: str, data: dict = None):
+def thinking(stage: str, message: str, data: dict = None)-> str:
     return format_sse(
         json.dumps(
             {"type": "thinking", "stage": stage, "message": message, "data": data or {}}
@@ -80,11 +82,48 @@ def thinking(stage: str, message: str, data: dict = None):
     )
 
 
-def token_event(token: str):
+def token_event(token: str)-> str:
     return format_sse(
         json.dumps({"type": "response", "token": token}), event="response"
     )
 
 
-def done_event():
+def done_event()-> str:
     return format_sse(json.dumps({"type": "done"}), event="done")
+
+
+def _thought(node: str, message: str, data: dict | None = None) -> dict:
+    return {"node": node, "message": message, "data": data, "ts": time.time()}
+
+
+def _parse_memory_to_messages(memory_context: str) -> list[MemoryMessage]:
+    if not memory_context.strip():
+        return []
+
+    messages = []
+    blocks = memory_context.split("USER:")
+    for block in blocks:
+        if not block.strip():
+            continue
+        if "A:" in block:
+            parts = block.split("A:")
+            human_text = parts[0].strip()
+            ai_text = parts[1].strip() if len(parts) > 1 else ""
+            if human_text:
+                messages.append({"type": "human", "content": human_text})
+            if ai_text:
+                messages.append({"type": "ai", "content": ai_text})
+        else:
+            messages.append({"type": "human", "content": block.strip()})
+    return messages
+
+# =====================================================
+# SHARED RAG HELPERS
+# =====================================================
+
+def rag_thought(node: str, message: str, data: dict | None = None) -> dict:
+    return {"node": node, "message": message, "data": data, "ts": time.time()}
+
+
+def rag_cache_key(session_id: str, document_ids: list[str]) -> str:
+    return session_id + "|" + "|".join(sorted(document_ids))

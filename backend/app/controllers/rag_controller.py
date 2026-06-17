@@ -29,6 +29,10 @@ from app.services.memory_service import (
     delete_session_memory,
 )
 from app.services.agentic_rag_service import run_agent
+from app.services.react_rag_service import run_react_agent
+from app.services.planner_rag_service import run_planner_agent
+from app.services.hybrid_rag_service import run_hybrid_agent
+from app.models.rag_model import AskDocumentRequest, AgentAskRequest, ResearchAskRequest
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
@@ -221,6 +225,65 @@ async def ask_agent(payload: AgentAskRequest):
 
     return {"answer": result}
 
+# =========================
+# RESEARCH AGENTS
+# =========================
+
+@router.post("/react/ask")
+async def react_ask(payload: ResearchAskRequest):
+    result = await run_react_agent(
+        session_id=payload.session_id,
+        question=payload.question,
+        document_ids=payload.document_ids,
+        stream=payload.stream,
+        use_web=payload.use_web,
+        strictness=payload.strictness,
+    )
+    if payload.stream:
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return {"answer": result}
+
+
+@router.post("/planner/ask")
+async def planner_ask(payload: ResearchAskRequest):
+    result = await run_planner_agent(
+        session_id=payload.session_id,
+        question=payload.question,
+        document_ids=payload.document_ids,
+        stream=payload.stream,
+        use_web=payload.use_web,
+        strictness=payload.strictness,
+    )
+    if payload.stream:
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return {"answer": result}
+
+
+@router.post("/research/ask")
+async def research_ask(payload: ResearchAskRequest):
+    result = await run_hybrid_agent(
+        session_id=payload.session_id,
+        question=payload.question,
+        document_ids=payload.document_ids,
+        stream=payload.stream,
+        use_web=payload.use_web,
+        strictness=payload.strictness,
+    )
+    if payload.stream:
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return {"answer": result}
 
 # =========================
 # SESSIONS

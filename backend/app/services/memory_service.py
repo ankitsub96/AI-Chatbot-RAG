@@ -144,7 +144,7 @@ async def save_conversation_turn(
     question: str,
     answer: str,
     thoughts: list[dict] | None = None,
-):
+) -> None:
     print("\n" + "=" * 80)
     print("SAVING CONVERSATION MEMORY")
     print("=" * 80)
@@ -306,7 +306,7 @@ ASSISTANT:
 def retrieve_relevant_memories(
     session_id: str,
     question: str,
-):
+) -> str:
     print("\nMEMORY RETRIEVAL")
 
     query_embedding = create_embedding(question)
@@ -438,6 +438,7 @@ def get_session_history(
                 "question": row.question,
                 "answer": row.answer,
                 "created_at": row.created_at,
+                "thoughts": row.thoughts,
             }
         )
     return {"total": total, "page": page, "page_size": page_size, "items": items}
