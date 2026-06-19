@@ -7,28 +7,28 @@ import operator
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableLambda
- 
-from app.utils.helpers import thinking, token_event, done_event, timer 
+
+from app.utils.helpers import thinking, token_event, done_event, timer
 from app.services.shared_rag_nodes import (
     check_cache_agent,
     serve_cache_agent,
     retrieve_memory_agent,
     save_turn_agent,
     route_cache_agent,
-    create_plan_agent,synthesize_agent
-    ,
+    create_plan_agent,
+    synthesize_agent,
     evaluate_agent,
     execute_steps_agent,
 )
-from app.models.chunk_types import StrictnessLevel 
-from app.models.agent_states import (
-    HybridState
-)  
+from app.models.chunk_types import StrictnessLevel
+from app.models.agent_states import HybridState
 from app.services.database import engine
 from sqlmodel import Session, select
+
 # =====================================================
 # GRAPH
 # =====================================================
+
 
 def build_graph() -> StateGraph:
     graph = StateGraph(HybridState)
@@ -44,10 +44,14 @@ def build_graph() -> StateGraph:
 
     graph.set_entry_point("check_cache")
 
-    graph.add_conditional_edges("check_cache", route_cache_agent, {
-        "serve_cache": "serve_cache",
-        "retrieve_memory": "retrieve_memory",
-    })
+    graph.add_conditional_edges(
+        "check_cache",
+        route_cache_agent,
+        {
+            "serve_cache": "serve_cache",
+            "retrieve_memory": "retrieve_memory",
+        },
+    )
 
     graph.add_edge("serve_cache", END)
     graph.add_edge("retrieve_memory", "create_plan")
@@ -67,6 +71,7 @@ hybrid_graph = build_graph()
 # ENTRY POINT
 # =====================================================
 
+
 @timer
 async def run_hybrid_agent(
     session_id: str,
@@ -78,6 +83,7 @@ async def run_hybrid_agent(
 ) -> str | AsyncGenerator[str, None]:
     if not document_ids:
         from app.models.session_document import SessionDocument
+
         with Session(engine) as db:
             rows = db.exec(
                 select(SessionDocument.document_id).where(
@@ -144,5 +150,15 @@ async def _stream_hybrid(initial_state: HybridState) -> AsyncGenerator[str, None
                     yield token_event(cached)
                 yield done_event()
                 return
+            if node_name == "synthesize":  # was "answer_synthesis"
+                answer = state.get("full_answer", "")
+                if answer:
+                    yield token_event(answer)
 
+            if node_name == "serve_cache":  # was "save_cache_hit"
+                cached = state.get("cache_answer", "")
+                if cached:
+                    yield token_event(cached)
+                yield done_event()
+                return
     yield done_event()

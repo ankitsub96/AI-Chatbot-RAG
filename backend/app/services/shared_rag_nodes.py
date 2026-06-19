@@ -55,6 +55,7 @@ from app.services.research_tools import (
     tool_answer_synthesizer,
     tool_answer_evaluator,
     run_tools_parallel,
+    tool_batch_answer_generator,
 )
 from app.config.settings import (
     REACT_MAX_ITERATIONS,
@@ -100,7 +101,11 @@ def check_cache_agent(state: dict) -> CacheCheckOutput:
 
 def serve_cache_agent(state: dict) -> CacheHitOutput:
     thought = rag_thought("cache_check", "Returning cached answer")
-    return {"last_thought": thought, "trace": [thought]}
+    return {
+        "cache_answer": state.get("cache_answer", ""),
+        "last_thought": thought,
+        "trace": [thought],
+    }
 
 
 def retrieve_memory_agent(state: dict) -> MemoryRetrievalOutput:
@@ -504,27 +509,52 @@ def answer_parallel_agent(state: PlannerState) -> NodeOutput:
     memory_context = state["memory_context"]
     strictness = state["strictness"]
 
-    tasks = [
-        (
-            tool_answer_generator,
-            (),
-            {
-                "question": step,
-                "context": step_contexts[i] if i < len(step_contexts) else "",
-                "memory_context": memory_context,
-                "strictness": strictness,
-            },
-        )
-        for i, step in enumerate(plan)
-    ]
+    batch_results = tool_batch_answer_generator(
+        steps=plan,
+        step_contexts=step_contexts,
+        memory_context=memory_context,
+        strictness=strictness,
+    )
 
-    results = run_tools_parallel(tasks)
-    sub_answers = [r["full_context"] for r in results if r["success"]]
+    missing_indices = [i for i in range(len(plan)) if i not in batch_results]
+
+    fallback_results = {}
+    if missing_indices:
+        tasks = [
+            (
+                tool_answer_generator,
+                (),
+                {
+                    "question": plan[i],
+                    "context": step_contexts[i] if i < len(step_contexts) else "",
+                    "memory_context": memory_context,
+                    "strictness": strictness,
+                },
+            )
+            for i in missing_indices
+        ]
+        results = run_tools_parallel(tasks)
+        for idx, r in zip(missing_indices, results):
+            if r["success"]:
+                fallback_results[idx] = r["full_context"]
+
+    sub_answers = [
+        batch_results.get(i) or fallback_results.get(i, "") for i in range(len(plan))
+    ]
+    sub_answers = [a for a in sub_answers if a]
+
+    message = f"Generated {len(batch_results)} via batch call"
+    if missing_indices:
+        message += f", {len(fallback_results)} via fallback"
 
     thought = rag_thought(
         "parallel_answer_gen",
-        f"Generated {len(sub_answers)} sub-answers in parallel",
-        {"count": len(sub_answers)},
+        message,
+        {
+            "count": len(sub_answers),
+            "batched": len(batch_results),
+            "fallback": len(fallback_results),
+        },
     )
     return {
         "sub_answers": sub_answers,

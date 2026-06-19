@@ -23,6 +23,7 @@ from app.models.conversation_summary import (
 )
 from app.models.session import Session as SessionModel
 
+from app.utils.helpers import timer
 from app.utils.file_utils import save_json_file, load_json_file, write_text_file
 
 # =========================
@@ -93,16 +94,15 @@ def load_summary(session_id: str):
 # =========================
 
 
-def summarize_conversation(history):
+@timer
+def summarize_conversation(history, previous_summary: str | None = None):
 
     if not history:
-
-        return ""
+        return previous_summary or ""
 
     text = ""
 
     for item in history:
-
         text += f"""
 
 USER:
@@ -112,8 +112,15 @@ ASSISTANT:
 {item['answer']}
 """
 
+    previous_block = (
+        f"Previous summary of earlier conversation:\n{previous_summary}\n\n"
+        if previous_summary
+        else ""
+    )
+
     prompt = f"""
-Summarize this conversation memory.
+{previous_block}Update the summary above (if any) using the new conversation below.
+Produce a single combined summary, not two separate ones.
 
 Preserve:
 - important facts
@@ -123,7 +130,7 @@ Preserve:
 - decisions
 - context continuity
 
-Conversation:
+New conversation:
 {text}
 """
 
@@ -157,17 +164,9 @@ ASSISTANT:
 {answer}
 """
 
-    # =========================
-    # SAVE CURRENT MEMORY
-    # =========================
-
-    embedding = await asyncio.to_thread(
-        create_embedding,
-        memory_text,
-    )
+    embedding = await asyncio.to_thread(create_embedding, memory_text)
 
     with Session(engine) as session:
-
         session.add(
             ConversationMemory(
                 session_id=session_id,
@@ -178,52 +177,54 @@ ASSISTANT:
                 thoughts=thoughts,
             )
         )
-
         session.commit()
 
     # =========================
-    # LOAD SESSION MEMORIES
+    # FIND LAST SUMMARY (if any)
     # =========================
 
     with Session(engine) as session:
-
-        memories = session.exec(
-            select(ConversationMemory)
-            .where(ConversationMemory.session_id == session_id)
-            .order_by(ConversationMemory.created_at)
-        ).all()
+        last_summary = session.exec(
+            select(ConversationSummary)
+            .where(ConversationSummary.session_id == session_id)
+            .order_by(ConversationSummary.created_at.desc())
+        ).first()
 
     # =========================
-    # SUMMARIZATION
+    # LOAD ONLY NEW MEMORIES SINCE LAST SUMMARY
     # =========================
 
-    if len(memories) > SUMMARY_TRIGGER:
+    with Session(engine) as session:
+        stmt = select(ConversationMemory).where(
+            ConversationMemory.session_id == session_id
+        )
+        if last_summary:
+            stmt = stmt.where(ConversationMemory.created_at > last_summary.created_at)
+        stmt = stmt.order_by(ConversationMemory.created_at)
 
-        old_memories = memories[:-RECENT_HISTORY]
+        candidate_memories = session.exec(stmt).all()
 
-        summary_input = []
+    # =========================
+    # SUMMARIZATION (only the delta, keep RECENT_HISTORY raw)
+    # =========================
 
-        for memory in old_memories:
+    pending = (
+        candidate_memories[:-RECENT_HISTORY] if RECENT_HISTORY else candidate_memories
+    )
 
-            summary_input.append(
-                {
-                    "question": memory.question,
-                    "answer": memory.answer,
-                }
-            )
+    if len(pending) > SUMMARY_TRIGGER:
+
+        summary_input = [{"question": m.question, "answer": m.answer} for m in pending]
 
         new_summary = await asyncio.to_thread(
             summarize_conversation,
             summary_input,
+            last_summary.summary if last_summary else None,
         )
 
-        summary_embedding = await asyncio.to_thread(
-            create_embedding,
-            new_summary,
-        )
+        summary_embedding = await asyncio.to_thread(create_embedding, new_summary)
 
         with Session(engine) as session:
-
             session.add(
                 ConversationSummary(
                     session_id=session_id,
@@ -231,26 +232,7 @@ ASSISTANT:
                     embedding=summary_embedding[0].tolist(),
                 )
             )
-
             session.commit()
-
-        # =========================
-        # DELETE SUMMARIZED MEMORIES
-        # KEEP RECENT ONLY
-        # =========================
-
-        # old_ids = [memory.id for memory in old_memories]
-
-        # with Session(engine) as session:
-
-        #     rows = session.exec(
-        #         select(ConversationMemory).where(ConversationMemory.id.in_(old_ids))
-        #     ).all()
-
-        #     for row in rows:
-        #         session.delete(row)
-
-        #     session.commit()
 
     print("\nMEMORY SAVE COMPLETE")
 

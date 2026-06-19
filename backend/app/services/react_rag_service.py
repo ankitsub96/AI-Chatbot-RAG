@@ -193,8 +193,17 @@ async def _stream_react(initial_state: ReactState) -> AsyncGenerator[str, None]:
                 answer = state.get("full_answer", "")
                 if answer:
                     yield token_event(answer)
-
+            if node_name == "respond":
+                answer = state.get("full_answer", "")
+                if answer:
+                    yield token_event(answer)
             if node_name == "save_cache_hit":
+                cached = state.get("cache_answer", "")
+                if cached:
+                    yield token_event(cached)
+                yield done_event()
+                return
+            if node_name == "serve_cache":
                 cached = state.get("cache_answer", "")
                 if cached:
                     yield token_event(cached)

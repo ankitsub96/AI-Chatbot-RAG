@@ -30,7 +30,14 @@ from app.services.semantic_cache_service import (
     set_exact_cache,
     set_semantic_cache,
 )
-from app.utils.helpers import format_sse, token_event, done_event, timer, _thought,_parse_memory_to_messages
+from app.utils.helpers import (
+    format_sse,
+    token_event,
+    done_event,
+    timer,
+    _thought,
+    _parse_memory_to_messages,
+)
 from app.config.settings import TOP_K, MAX_RETRIES, CONFIDENCE_THRESHOLD
 from app.services.database import engine
 from app.models.document_chunk import DocumentChunk

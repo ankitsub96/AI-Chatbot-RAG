@@ -23,6 +23,9 @@ from app.models.chunk_types import (
     StrictnessLevel,
     ToolResult,
 )
+from app.utils.helpers import (
+    timer,
+)
 from app.config.settings import TOP_K, WEB_SEARCH_MAX_RESULTS
 from sqlmodel import Session, select
 
@@ -262,6 +265,7 @@ Question: {question}
 # =====================================================
 
 
+@timer
 def tool_answer_generator(
     question: str,
     context: str,
@@ -479,3 +483,55 @@ def run_tools_parallel(
                 )
 
     return results
+
+
+def tool_batch_answer_generator(
+    steps: list[str],
+    step_contexts: list[str],
+    memory_context: str = "",
+    strictness: StrictnessLevel = "balanced",
+) -> dict[int, str]:
+    """Attempts all step answers in a single call. Returns {index: answer}
+    only for steps the model actually answered — caller falls back for the rest."""
+    strictness_instruction = {
+        "strict": "Answer ONLY from the document context. If not found, say so.",
+        "balanced": "Prefer document context. You may use general knowledge to connect ideas.",
+        "creative": "Use document context and your knowledge freely to give a complete answer.",
+    }.get(strictness, "Prefer document context.")
+
+    steps_block = "\n\n".join(
+        f"--- STEP {i} ---\nQuestion: {step}\nContext:\n{step_contexts[i] if i < len(step_contexts) else ''}"
+        for i, step in enumerate(steps)
+    )
+
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are a document research assistant answering multiple sub-questions in one pass.\n"
+                f"{strictness_instruction}\n"
+                f"Memory context:\n{memory_context or 'None'}\n\n"
+                "Respond with ONLY a JSON object, no markdown fences, shaped exactly like: "
+                '{"0": "answer to step 0", "1": "answer to step 1", ...}. '
+                "Keys are the step numbers as strings. If you cannot answer a step, omit its key."
+            ),
+        },
+        {"role": "user", "content": steps_block},
+    ]
+
+    try:
+        response = generate_response(
+            messages=prompt,
+            temperature=0,
+            max_tokens=4000,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(raw)
+        return {
+            int(k): v for k, v in parsed.items() if isinstance(v, str) and v.strip()
+        }
+    except Exception as e:
+        print(f"[tool_batch_answer_generator] batch call failed: {e}")
+        return {}

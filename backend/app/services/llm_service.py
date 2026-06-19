@@ -1,4 +1,5 @@
 import json
+
 # import openai
 from app.clients.groq_client import client
 from app.config.settings import MODEL
@@ -11,7 +12,8 @@ def generate_response(
     tools=None,
     tool_choice=None,
     max_tokens=None,
-# )-> openai.types.chat.ChatCompletion:
+    response_format=None,
+    # )-> openai.types.chat.ChatCompletion:
 ):
 
     kwargs = {
@@ -32,9 +34,23 @@ def generate_response(
 
         kwargs["max_tokens"] = max_tokens
 
-    response = client.chat.completions.create(**kwargs)
+    if response_format:
 
-    return response
+        kwargs["response_format"] = response_format
+
+    raw = client.chat.completions.with_raw_response.create(**kwargs)
+    print(
+        {
+            "limit_requests": raw.headers.get("x-ratelimit-limit-requests"),
+            "remaining_requests": raw.headers.get("x-ratelimit-remaining-requests"),
+            "limit_tokens": raw.headers.get("x-ratelimit-limit-tokens"),
+            "remaining_tokens": raw.headers.get("x-ratelimit-remaining-tokens"),
+            "reset_requests": raw.headers.get("x-ratelimit-reset-requests"),
+            "reset_tokens": raw.headers.get("x-ratelimit-reset-tokens"),
+            "retry_after": raw.headers.get("retry-after"),
+        }
+    )
+    return raw.parse()
 
 
 @timer

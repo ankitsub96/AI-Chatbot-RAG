@@ -25,7 +25,7 @@ from app.services.semantic_cache_service import (
     set_exact_cache,
     set_semantic_cache,
 )
-from app.utils.helpers import thinking, token_event, done_event, timer 
+from app.utils.helpers import thinking, token_event, done_event, timer
 from app.models.chunk_types import StrictnessLevel, NodeOutput, AnyToolResult
 from app.models.agent_states import PlannerState, PlannerNodeOutput
 from app.config.settings import PLANNER_MAX_STEPS, CONFIDENCE_THRESHOLD
@@ -44,16 +44,16 @@ from app.services.shared_rag_nodes import (
     evaluate_agent,
 )
 
-
 # =====================================================
 # GRAPH
 # =====================================================
+
 
 def build_graph() -> StateGraph:
     graph = StateGraph(PlannerState)
 
     graph.add_node("check_cache", RunnableLambda(timer(check_cache_agent)))
-    graph.add_node("serve_cache", RunnableLambda(timer(serve_cache_agent)))
+    graph.add_node("save_cache_hit", RunnableLambda(timer(serve_cache_agent)))
     graph.add_node("retrieve_memory", RunnableLambda(timer(retrieve_memory_agent)))
     graph.add_node("create_plan", RunnableLambda(timer(create_plan_agent)))
     graph.add_node("search_parallel", RunnableLambda(timer(search_parallel_agent)))
@@ -64,12 +64,16 @@ def build_graph() -> StateGraph:
 
     graph.set_entry_point("check_cache")
 
-    graph.add_conditional_edges("check_cache", route_cache_agent, {
-        "serve_cache": "serve_cache",
-        "retrieve_memory": "retrieve_memory",
-    })
+    graph.add_conditional_edges(
+        "check_cache",
+        route_cache_agent,
+        {
+            "save_cache_hit": "save_cache_hit",
+            "retrieve_memory": "retrieve_memory",
+        },
+    )
 
-    graph.add_edge("serve_cache", END)
+    graph.add_edge("save_cache_hit", END)
     graph.add_edge("retrieve_memory", "create_plan")
     graph.add_edge("create_plan", "search_parallel")
     graph.add_edge("search_parallel", "answer_parallel")
@@ -88,6 +92,7 @@ planner_graph = build_graph()
 # ENTRY POINT
 # =====================================================
 
+
 @timer
 async def run_planner_agent(
     session_id: str,
@@ -99,6 +104,7 @@ async def run_planner_agent(
 ) -> str | AsyncGenerator[str, None]:
     if not document_ids:
         from app.models.session_document import SessionDocument
+
         with Session(engine) as db:
             rows = db.exec(
                 select(SessionDocument.document_id).where(
@@ -160,6 +166,17 @@ async def _stream_planner(initial_state: PlannerState) -> AsyncGenerator[str, No
                     yield token_event(answer)
 
             if node_name == "save_cache_hit":
+                cached = state.get("cache_answer", "")
+                if cached:
+                    yield token_event(cached)
+                yield done_event()
+                return
+            if node_name == "synthesize":  # was "answer_synthesis"
+                answer = state.get("full_answer", "")
+                if answer:
+                    yield token_event(answer)
+
+            if node_name == "serve_cache":  # was "save_cache_hit"
                 cached = state.get("cache_answer", "")
                 if cached:
                     yield token_event(cached)
