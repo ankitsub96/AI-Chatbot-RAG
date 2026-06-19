@@ -1,5 +1,6 @@
 from typing import TypedDict, Literal
 
+
 class ChunkDict(TypedDict):
     id: str
     document_id: str
@@ -12,13 +13,16 @@ class ChunkDict(TypedDict):
     text: str
     chunk_metadata: dict | None
 
+
 class HybridResultDict(ChunkDict):
     hybrid_score: float
+
 
 class GroupedParentDict(TypedDict):
     parent_id: str
     score: float
     chunks: list[ChunkDict]
+
 
 StrictnessLevel = Literal["strict", "balanced", "creative"]
 
@@ -37,29 +41,38 @@ class ToolResult(TypedDict):
 class DocumentSearchResult(ToolResult):
     name: Literal["document_search"]
 
+
 class PageLookupResult(ToolResult):
     name: Literal["page_lookup"]
+
 
 class WebSearchResult(ToolResult):
     name: Literal["web_search"]
 
+
 class QueryExpanderResult(ToolResult):
     name: Literal["query_expander"]
+
 
 class QuestionDecomposerResult(ToolResult):
     name: Literal["question_decomposer"]
 
+
 class AnswerGeneratorResult(ToolResult):
     name: Literal["answer_generator"]
+
 
 class AnswerSynthesizerResult(ToolResult):
     name: Literal["answer_synthesizer"]
 
+
 class AnswerEvaluatorResult(ToolResult):
     name: Literal["answer_evaluator"]
 
+
 class MemorySearchResult(ToolResult):
     name: Literal["memory_search"]
+
 
 AnyToolResult = (
     DocumentSearchResult
@@ -71,7 +84,7 @@ AnyToolResult = (
     | AnswerSynthesizerResult
     | AnswerEvaluatorResult
     | MemorySearchResult
-)    
+)
 
 
 class NodeOutput(TypedDict, total=False):
@@ -92,7 +105,8 @@ class NodeOutput(TypedDict, total=False):
     last_thought: dict
     cache_hit: bool
     cache_answer: str | None
-    
+
+
 class CacheCheckOutput(TypedDict, total=False):
     cache_hit: bool
     cache_answer: str | None
@@ -100,19 +114,23 @@ class CacheCheckOutput(TypedDict, total=False):
     last_thought: dict
     trace: list[dict]
 
+
 class CacheHitOutput(TypedDict, total=False):
     last_thought: dict
     trace: list[dict]
 
+
 class MemoryMessage(TypedDict):
     type: Literal["human", "ai"]
     content: str
-    
+
+
 class MemoryRetrievalOutput(TypedDict, total=False):
     memory_context: str
     memory_messages: list[MemoryMessage]
     last_thought: dict
     trace: list[dict]
+
 
 class SaveAndReturnOutput(TypedDict, total=False):
     last_thought: dict

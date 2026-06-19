@@ -6,24 +6,41 @@ export function useDocumentSelection(sessionId) {
   const [selectedIds, setSelectedIds] = useState([]) // document_id strings
   const [loading, setLoading] = useState(false)
 
-  const refresh = useCallback(async () => {
-    if (!sessionId) { setDocuments([]); setSelectedIds([]); return }
+  const fetchDocuments = useCallback(async (signal) => {
+    if (!sessionId) {
+      setDocuments([])
+      setSelectedIds([])
+      return
+    }
     setLoading(true)
     try {
-      const docs = await getSessionDocuments(sessionId)
+      const docs = await getSessionDocuments(sessionId, signal)
+      if (signal?.aborted) return
       setDocuments(docs)
       // auto-select all ready docs on first load
       const readyIds = docs.filter(d => d.status === 'ready').map(d => d.document_id)
       setSelectedIds(readyIds)
     } catch {
+      if (signal?.aborted) return
       setDocuments([])
       setSelectedIds([])
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [sessionId])
 
-  useEffect(() => { refresh() }, [refresh])
+  // Guarded against React StrictMode's dev-mode double-invoke the same way
+  // as useSessions.js — the AbortController cancels the first, stale
+  // request on the synthetic mount → cleanup → mount cycle.
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchDocuments(controller.signal)
+    return () => controller.abort()
+  }, [fetchDocuments])
+
+  // Manual refresh (e.g. the refresh button in the doc picker) — no signal,
+  // not called from a mount effect so there's nothing to race against.
+  const refresh = useCallback(() => fetchDocuments(), [fetchDocuments])
 
   const toggleDocument = useCallback((documentId) => {
     setSelectedIds(prev => {

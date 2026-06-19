@@ -1,103 +1,175 @@
 import { useState, useCallback, useEffect } from 'react'
-import { askDocument, askDocumentStream } from '../api/ragApi'
+import { askEndpoint } from '../api/ragApi'
+import { createSSEStreamReader } from '../utils/sseParser'
+import { DEFAULT_ENDPOINT_ID, DEFAULT_STRICTNESS, getEndpointConfig } from '../config/endpoints'
 
-export function useChat(sessionId, sessions, selectedIds, streaming) {
+export function useChat(
+  sessionId,
+  sessions,
+  selectedIds,
+  streaming,
+  endpointId = DEFAULT_ENDPOINT_ID,
+  strictness = DEFAULT_STRICTNESS,
+  useWeb = false,
+) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
-  const [streamingMsg, setStreamingMsg] = useState('')
-  const [thinkingSteps, setThinkingSteps] = useState([])
-  const [isThinking, setIsThinking] = useState(false)
   const [sessionName, setSessionName] = useState('Untitled')
-  console.log({ sessions })
 
-  const appendUser = (text) =>
-    setMessages(prev => [...prev, { role: 'user', content: text, ts: Date.now() }])
-
-  const appendAssistant = (text) =>
-    setMessages(prev => [...prev, { role: 'assistant', content: text, ts: Date.now() }])
   useEffect(() => {
     setSessionName(findSessionName())
-  }, [sessions])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, sessionId])
+
   function findSessionName() {
-    const session = (sessions || []).find(s => s.id === sessionId)
-
+    const session = (sessions || []).find(s => s.session_id === sessionId || s.id === sessionId)
     if (!session) return 'Untitled'
-
     return session.title || session.session_id?.slice(0, 16) || 'Untitled'
   }
+
+  // ── Message-array helpers ──────────────────────────────
+  // Every assistant message owns its own thoughts/isThinking/endpoint/
+  // strictness — nothing about streaming state lives outside `messages`
+  // anymore. Appending a new user+assistant pair never touches earlier
+  // entries, which is what keeps a previous answer from disappearing when
+  // a second question is asked.
+
+  const appendUserMessage = (text) =>
+    setMessages(prev => [...prev, { role: 'user', content: text, ts: Date.now() }])
+
+  const appendAssistantPlaceholder = (meta) =>
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: '',
+      ts: Date.now(),
+      thoughts: [],
+      hasThoughts: false,
+      isThinking: false,
+      endpoint: meta.endpoint,
+      strictness: meta.strictness,
+    }])
+
+  // Mutates the *last* message in place. Safe to assume it's the one
+  // in-flight assistant placeholder: `send()` guards on `loading` so only
+  // one message can ever be streaming at a time.
+  const updateLastAssistant = (updater) =>
+    setMessages(prev => {
+      if (prev.length === 0) return prev
+      const next = prev.slice()
+      next[next.length - 1] = updater(next[next.length - 1])
+      return next
+    })
+
+  const appendThought = (thought) =>
+    updateLastAssistant(msg => ({
+      ...msg,
+      isThinking: true,
+      hasThoughts: true,
+      thoughts: [...msg.thoughts, thought],
+    }))
+
+  const appendToken = (token) =>
+    updateLastAssistant(msg => ({
+      ...msg,
+      isThinking: false,
+      content: msg.content + token,
+    }))
+
+  const finalizeAssistant = () =>
+    updateLastAssistant(msg => ({ ...msg, isThinking: false }))
+
+  const setAssistantContent = (content, thoughts) =>
+    updateLastAssistant(msg => ({
+      ...msg,
+      content,
+      thoughts,
+      hasThoughts: thoughts.length > 0,
+      isThinking: false,
+    }))
+
+  const setAssistantError = (text) =>
+    updateLastAssistant(msg => ({ ...msg, content: text, isThinking: false }))
+
+  // ── send ─────────────────────────────────────────────────
+
   const send = useCallback(async (question) => {
     if (!question.trim() || loading) return
 
-    appendUser(question)
+    appendUserMessage(question)
     setLoading(true)
-    setStreamingMsg('')
-    setThinkingSteps([])
-    setIsThinking(false)
 
     // pass null if all ready docs selected (backend resolves from session)
     const docIds = selectedIds.length ? selectedIds : null
+    const config = getEndpointConfig(endpointId)
+
+    appendAssistantPlaceholder({
+      endpoint: endpointId,
+      // only record strictness when this endpoint actually used it —
+      // otherwise it'd misleadingly imply a value that was never sent
+      strictness: config?.supportsStrictness ? strictness : null,
+    })
 
     try {
-      if (streaming) {
-        const response = await askDocumentStream(sessionId, question, docIds)
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let full = ''
+      const result = await askEndpoint(endpointId, {
+        sessionId,
+        question,
+        documentIds: docIds,
+        stream: streaming,
+        useWeb,
+        strictness,
+      })
 
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          for (const line of decoder.decode(value).split('\n')) {
-            if (!line.startsWith('data:')) continue
-            try {
-              const data = JSON.parse(line.slice(5).trim())
-
-              // thinking event
-              if (data.thinking) {
-                setIsThinking(true)
-                setThinkingSteps(prev => [...prev, {
-                  event: data.thinking,
-                  message: data.message || '',
-                  ts: Date.now(),
-                }])
-                continue
-              }
-
-              // token
-              if (data.token) {
-                setIsThinking(false)
-                full += data.token
-                setStreamingMsg(full)
-              }
-
-              // done
-              if (data.done) {
-                appendAssistant(full)
-                setStreamingMsg('')
-                setIsThinking(false)
-              }
-            } catch { /* incomplete chunk */ }
-          }
+      if (result instanceof Response) {
+        // streaming: askEndpoint handed back the raw fetch Response —
+        // pipe it through the one shared SSE reader, for both legacy and
+        // new wire formats alike
+        if (!result.ok) {
+          throw new Error(`Request failed (${result.status})`)
         }
+
+        await createSSEStreamReader(result, (event) => {
+          console.log('SSE EVENT', event)
+          switch (event.kind) {
+            case 'thinking':
+              appendThought({
+                stage: event.stage ||
+                  event.node ||
+                  event.event ||
+                  event.thinking ||
+                  'thinking',
+                message: event.message || '',
+                data: event.data || null,
+                ts: Date.now(),
+              })
+              break
+            case 'token':
+              appendToken(event.token)
+              break
+            case 'done':
+              finalizeAssistant()
+              break
+            default:
+              break
+          }
+        })
+        // belt-and-suspenders: not every server is guaranteed to emit an
+        // explicit `done` event before closing the stream
+        finalizeAssistant()
       } else {
-        const data = await askDocument(sessionId, question, docIds)
-        appendAssistant(data.answer)
+        // non-streaming: askEndpoint already resolved the parsed JSON answer
+        setAssistantContent(result?.answer ?? '', result?.thoughts || [])
       }
     } catch (err) {
-      appendAssistant(`Error: ${err.message}`)
+      setAssistantError(`Error: ${err.message}`)
     } finally {
       setLoading(false)
-      setIsThinking(false)
     }
-  }, [sessionId, selectedIds, streaming, loading])
+  }, [sessionId, selectedIds, streaming, loading, endpointId, strictness, useWeb])
 
   return {
     messages,
     loading,
-    streamingMsg,
-    thinkingSteps,
-    isThinking, sessionName,
+    sessionName,
     send,
     setMessages,
   }

@@ -33,8 +33,12 @@ function Chat({ sessions, createSession, removeSession, loadHistory, theme, them
       />
       <ChatWindow
         sessionId={sessionId}
+        activeId={sessionId}
         sessions={sessions}
         loadHistory={loadHistory}
+        theme={theme}
+        themes={themes}
+        setTheme={setTheme}
       />
     </div>
   )
@@ -42,8 +46,15 @@ function Chat({ sessions, createSession, removeSession, loadHistory, theme, them
 
 export default function App() {
   const { sessions, createSession, removeSession, loadHistory } = useSessions()
-  const { theme, setTheme, themes } = useTheme()
+  const {
+    theme,
+    mode,
+    setTheme,
+    setMode,
+    themes
+  } = useTheme()
   const navigate = useNavigate()
+  const { sessionId } = useParams()
 
   const sharedProps = { sessions, createSession, removeSession, loadHistory, theme, themes, setTheme }
 
@@ -67,7 +78,14 @@ export default function App() {
             themes={themes}
             onThemeChange={setTheme}
           />
-          <ChatWindow sessionId={null} loadHistory={loadHistory} />
+          <ChatWindow
+            sessionId={sessionId}
+            activeId={sessionId}
+            sessions={sessions}
+            loadHistory={loadHistory}
+            theme={theme}
+            themes={themes}
+            setTheme={setTheme} />
         </div>
       } />
       <Route path="/chat/:sessionId" element={<Chat {...sharedProps} />} />
