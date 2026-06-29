@@ -65,7 +65,7 @@ def build_graph() -> StateGraph:
     graph = StateGraph(ReactState)
 
     graph.add_node("check_cache", RunnableLambda(timer(check_cache_agent)))
-    graph.add_node("serve_cache", RunnableLambda(timer(serve_cache_agent)))
+    graph.add_node("save_cache_hit", RunnableLambda(timer(serve_cache_agent)))
     graph.add_node("retrieve_memory", RunnableLambda(timer(retrieve_memory_agent)))
     graph.add_node("reason", RunnableLambda(timer(reason_agent)))
     graph.add_node("act", RunnableLambda(timer(act_agent)))
@@ -79,12 +79,12 @@ def build_graph() -> StateGraph:
         "check_cache",
         route_cache_agent,
         {
-            "serve_cache": "serve_cache",
+            "save_cache_hit": "save_cache_hit",
             "retrieve_memory": "retrieve_memory",
         },
     )
 
-    graph.add_edge("serve_cache", END)
+    graph.add_edge("save_cache_hit", END)
     graph.add_edge("retrieve_memory", "reason")
 
     graph.add_conditional_edges(

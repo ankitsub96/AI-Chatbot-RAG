@@ -425,7 +425,10 @@ export default function ChatWindow({ sessionId,
         <UploadModal
           sessionId={activeId}
           onClose={() => setShowUpload(false)}
-          onUploaded={(result) => { onUploaded?.(result); setShowUpload(false) }}
+          onUploaded={(result) => {
+            if (onUploaded) onUploaded?.(result);
+            setShowUpload(false)
+          }}
         />
       )}
     </div>

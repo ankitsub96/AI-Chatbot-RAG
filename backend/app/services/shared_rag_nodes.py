@@ -443,8 +443,8 @@ def route_step_agent(state: StepState) -> str:
     action = last.get("action", "finish")
 
     if action == "finish" or iteration >= REACT_MAX_ITERATIONS:
-        return "step_answer"
-    return "step_react"
+        return "respond"
+    return "act"
 
 
 def create_plan_agent(state: PlannerState) -> NodeOutput:

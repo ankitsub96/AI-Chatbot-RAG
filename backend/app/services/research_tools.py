@@ -330,7 +330,9 @@ def tool_answer_synthesizer(
     prompt = [
         {
             "role": "system",
-            "content": (f"You are a research synthesizer.\n{strictness_instruction}"),
+            "content": (
+                f"You are a research synthesizer. Don't mention multiple answers/sub-answers are used to synthesise final answer, or your lack of context\n{strictness_instruction}"
+            ),
         },
         {
             "role": "user",

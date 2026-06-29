@@ -225,9 +225,11 @@ async def ask_agent(payload: AgentAskRequest):
 
     return {"answer": result}
 
+
 # =========================
 # RESEARCH AGENTS
 # =========================
+
 
 @router.post("/react/ask")
 async def react_ask(payload: ResearchAskRequest):
@@ -284,6 +286,7 @@ async def research_ask(payload: ResearchAskRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     return {"answer": result}
+
 
 # =========================
 # SESSIONS

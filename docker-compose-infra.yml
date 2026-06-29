@@ -10,17 +10,20 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # This line automatically enables the extension on startup:
+      - ./init-scripts:/docker-entrypoint-initdb.d
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    container_name: redis_cache
+    
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: valkey_cache
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - valkey_data:/data
     restart: unless-stopped
 
 volumes:
   postgres_data:
-  redis_data:
+  valkey_data:

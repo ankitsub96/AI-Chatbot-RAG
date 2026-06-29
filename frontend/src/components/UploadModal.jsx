@@ -4,37 +4,37 @@ import '../styles/Modal.scss'
 
 const UploadIcon = () => (
   <svg viewBox="0 0 24 24" strokeWidth="2" fill="none">
-    <polyline points="16 16 12 12 8 16"/>
-    <line x1="12" y1="12" x2="12" y2="21"/>
-    <path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/>
+    <polyline points="16 16 12 12 8 16" />
+    <line x1="12" y1="12" x2="12" y2="21" />
+    <path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3" />
   </svg>
 )
 
 const FileIcon = () => (
   <svg viewBox="0 0 24 24" strokeWidth="2" fill="none">
-    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-    <polyline points="14 2 14 8 20 8"/>
+    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
   </svg>
 )
 
 const XIcon = () => (
   <svg viewBox="0 0 24 24" strokeWidth="2" fill="none">
-    <line x1="18" y1="6" x2="6" y2="18"/>
-    <line x1="6" y1="6" x2="18" y2="18"/>
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
   </svg>
 )
 
 const CheckIcon = () => (
   <svg viewBox="0 0 24 24" strokeWidth="2.5" fill="none">
-    <polyline points="20 6 9 17 4 12"/>
+    <polyline points="20 6 9 17 4 12" />
   </svg>
 )
 
 const AlertIcon = () => (
   <svg viewBox="0 0 24 24" strokeWidth="2" fill="none">
-    <circle cx="12" cy="12" r="10"/>
-    <line x1="12" y1="8" x2="12" y2="12"/>
-    <line x1="12" y1="16" x2="12.01" y2="16"/>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="8" x2="12" y2="12" />
+    <line x1="12" y1="16" x2="12.01" y2="16" />
   </svg>
 )
 
@@ -72,7 +72,7 @@ export default function UploadModal({ sessionId, onClose, onUploaded }) {
       const result = await uploadDocument(file, sessionId, setProgress)
       setStatus('done')
       setTimeout(() => {
-        onUploaded(result)
+        if (onUploaded) onUploaded(result)
         onClose()
       }, 900)
     } catch (err) {
