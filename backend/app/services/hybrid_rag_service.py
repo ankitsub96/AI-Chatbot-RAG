@@ -7,6 +7,8 @@ import operator
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableLambda
+from langfuse.callback import CallbackHandler
+
 
 from app.utils.helpers import thinking, token_event, done_event, timer
 from app.services.shared_rag_nodes import (
@@ -28,6 +30,16 @@ from sqlmodel import Session, select
 # =====================================================
 # GRAPH
 # =====================================================
+
+
+def get_langfuse_callback(session_id: str, question: str):
+    """Generates a Langfuse callback bound to a unique trace session."""
+    return CallbackHandler(
+        trace_name="hybrid_agent_graph",
+        session_id=session_id,
+        user_id="user_placeholder",  # Optional: track user metrics
+        metadata={"initial_question": question},
+    )
 
 
 def build_graph() -> StateGraph:
@@ -118,14 +130,71 @@ async def run_hybrid_agent(
 
 
 async def _run_hybrid_sync(initial_state: HybridState) -> str:
-    final_state = await asyncio.to_thread(lambda: hybrid_graph.invoke(initial_state))
+    # final_state = await asyncio.to_thread(lambda: hybrid_graph.invoke(initial_state))
+    # if final_state.get("cache_hit"):
+    #     return final_state["cache_answer"]
+    # return final_state["full_answer"]
+    langfuse_callback = get_langfuse_callback(
+        initial_state["session_id"], initial_state["question"]
+    )
+
+    # Pass the handler inside the config dictionary
+    final_state = await asyncio.to_thread(
+        lambda: hybrid_graph.invoke(
+            initial_state, config={"callbacks": [langfuse_callback]}
+        )
+    )
     if final_state.get("cache_hit"):
         return final_state["cache_answer"]
     return final_state["full_answer"]
 
 
 async def _stream_hybrid(initial_state: HybridState) -> AsyncGenerator[str, None]:
-    async for snapshot in hybrid_graph.astream(initial_state):
+    # async for snapshot in hybrid_graph.astream(initial_state):
+    #     for node_name, state in snapshot.items():
+    #         if node_name == "__end__":
+    #             yield done_event()
+    #             return
+
+    #         thought = state.get("last_thought", {})
+    #         if thought:
+    #             yield thinking(
+    #                 stage=thought.get("node", node_name),
+    #                 message=thought.get("message", ""),
+    #                 data=thought.get("data") or {},
+    #             )
+
+    #         if node_name == "answer_synthesis":
+    #             answer = state.get("full_answer", "")
+    #             if answer:
+    #                 yield token_event(answer)
+
+    #         if node_name == "save_cache_hit":
+    #             cached = state.get("cache_answer", "")
+    #             if cached:
+    #                 yield token_event(cached)
+    #             yield done_event()
+    #             return
+    #         if node_name == "synthesize":  # was "answer_synthesis"
+    #             answer = state.get("full_answer", "")
+    #             if answer:
+    #                 yield token_event(answer)
+
+    #         if node_name == "serve_cache":  # was "save_cache_hit"
+    #             cached = state.get("cache_answer", "")
+    #             if cached:
+    #                 yield token_event(cached)
+    #             yield done_event()
+    #             return
+    # yield done_event()
+    langfuse_callback = get_langfuse_callback(
+        initial_state["session_id"], initial_state["question"]
+    )
+
+    # Pass the handler inside the config dictionary during streaming execution
+    async for snapshot in hybrid_graph.astream(
+        initial_state, config={"callbacks": [langfuse_callback]}
+    ):
         for node_name, state in snapshot.items():
             if node_name == "__end__":
                 yield done_event()
@@ -139,23 +208,12 @@ async def _stream_hybrid(initial_state: HybridState) -> AsyncGenerator[str, None
                     data=thought.get("data") or {},
                 )
 
-            if node_name == "answer_synthesis":
+            if node_name == "synthesize":
                 answer = state.get("full_answer", "")
                 if answer:
                     yield token_event(answer)
 
-            if node_name == "save_cache_hit":
-                cached = state.get("cache_answer", "")
-                if cached:
-                    yield token_event(cached)
-                yield done_event()
-                return
-            if node_name == "synthesize":  # was "answer_synthesis"
-                answer = state.get("full_answer", "")
-                if answer:
-                    yield token_event(answer)
-
-            if node_name == "serve_cache":  # was "save_cache_hit"
+            if node_name == "serve_cache":
                 cached = state.get("cache_answer", "")
                 if cached:
                     yield token_event(cached)

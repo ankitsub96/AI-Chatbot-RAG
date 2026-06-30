@@ -24,6 +24,21 @@ services:
       - valkey_data:/data
     restart: unless-stopped
 
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: langfuse_web
+    ports:
+      - "3050:3000" # Maps local port 3050 to container port 3000
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/langfuse_db
+      - NEXTAUTH_SECRET=my_ultra_secure_nextauth_secret_string_32_chars
+      - SALT=my_ultra_secure_salt_string_32_chars
+      - ENABLE_SIGNUP=true
+      - NEXTAUTH_URL=http://localhost:3050 
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   valkey_data:

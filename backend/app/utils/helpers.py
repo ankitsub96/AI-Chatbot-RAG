@@ -17,17 +17,20 @@ def create_cache_key(text: str):
     return hashlib.md5(text.encode()).hexdigest()
 
 
+import asyncio
+import functools
+import time
+
+
 def timer(func):
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
-
         with _lock:
             _active_counts[func.__name__] += 1
             instance = _active_counts[func.__name__]
 
         print(f"[{func.__name__}] instance {instance} started")
-
         start = time.perf_counter()
 
         try:
@@ -36,6 +39,22 @@ def timer(func):
             elapsed = time.perf_counter() - start
             print(f"[{func.__name__}] instance {instance} finished in {elapsed:.3f}s")
 
+            # --- EXTRACT AND EXTEND LANGCHAIN CONFIG METADATA ---
+            # Look for the LangChain 'config' positional or keyword argument passed by LangGraph
+            config = kwargs.get("config") or next(
+                (arg for arg in args if isinstance(arg, dict) and "metadata" in arg),
+                None,
+            )
+
+            if config and "metadata" in config:
+                config["metadata"].update(
+                    {
+                        "custom_timer_seconds": round(elapsed, 4),
+                        "concurrency_instance_id": instance,
+                    }
+                )
+            # ---------------------------------------------------
+
             with _lock:
                 _active_counts[func.__name__] -= 1
 
@@ -43,13 +62,11 @@ def timer(func):
 
     @functools.wraps(func)
     def sync_wrapper(*args, **kwargs):
-
         with _lock:
             _active_counts[func.__name__] += 1
             instance = _active_counts[func.__name__]
 
         print(f"[{func.__name__}] instance {instance} started")
-
         start = time.perf_counter()
 
         try:
@@ -58,6 +75,21 @@ def timer(func):
             elapsed = time.perf_counter() - start
             print(f"[{func.__name__}] instance {instance} finished in {elapsed:.3f}s")
 
+            # --- EXTRACT AND EXTEND LANGCHAIN CONFIG METADATA ---
+            config = kwargs.get("config") or next(
+                (arg for arg in args if isinstance(arg, dict) and "metadata" in arg),
+                None,
+            )
+
+            if config and "metadata" in config:
+                config["metadata"].update(
+                    {
+                        "custom_timer_seconds": round(elapsed, 4),
+                        "concurrency_instance_id": instance,
+                    }
+                )
+            # ---------------------------------------------------
+
             with _lock:
                 _active_counts[func.__name__] -= 1
 
@@ -65,7 +97,6 @@ def timer(func):
 
     if asyncio.iscoroutinefunction(func):
         return async_wrapper
-
     return sync_wrapper
 
 
@@ -73,7 +104,7 @@ def format_sse(data: str, event: str = "message") -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def thinking(stage: str, message: str, data: dict = None)-> str:
+def thinking(stage: str, message: str, data: dict = None) -> str:
     return format_sse(
         json.dumps(
             {"type": "thinking", "stage": stage, "message": message, "data": data or {}}
@@ -82,13 +113,13 @@ def thinking(stage: str, message: str, data: dict = None)-> str:
     )
 
 
-def token_event(token: str)-> str:
+def token_event(token: str) -> str:
     return format_sse(
         json.dumps({"type": "response", "token": token}), event="response"
     )
 
 
-def done_event()-> str:
+def done_event() -> str:
     return format_sse(json.dumps({"type": "done"}), event="done")
 
 
@@ -117,9 +148,11 @@ def _parse_memory_to_messages(memory_context: str) -> list[MemoryMessage]:
             messages.append({"type": "human", "content": block.strip()})
     return messages
 
+
 # =====================================================
 # SHARED RAG HELPERS
 # =====================================================
+
 
 def rag_thought(node: str, message: str, data: dict | None = None) -> dict:
     return {"node": node, "message": message, "data": data, "ts": time.time()}

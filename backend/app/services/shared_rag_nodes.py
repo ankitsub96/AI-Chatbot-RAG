@@ -383,6 +383,9 @@ def act_step_agent(state: StepState) -> StepToolOutput:
     tool_history = state["tool_history"]
     document_ids = state["document_ids"]
     use_web = state["use_web"]
+    # 1. Get and increment the active iteration counter
+    current_iteration = state.get("iteration", 0)
+    next_iteration = current_iteration + 1
 
     last = tool_history[-1]["decision"] if tool_history else {}
     action = last.get("action", "finish")
@@ -399,7 +402,8 @@ def act_step_agent(state: StepState) -> StepToolOutput:
         result = tool_web_search(query=query)
 
     new_context = state["collected_context"]
-    tool_record = {"action": action, "args": args, "result": "no result"}
+    # 2. Keep the 'decision' key structure intact so the next iteration can read it
+    tool_record = {"decision": {"action": action, "args": args}, "result": "no result"}
 
     if result:
         new_context = state["collected_context"] + "\n\n" + result["full_context"]
@@ -407,12 +411,15 @@ def act_step_agent(state: StepState) -> StepToolOutput:
 
     thought = rag_thought(
         "step_tool",
-        f"Step executed {action}",
+        f"Step executed {action} (Iteration {next_iteration})",
         {"truncated_result": tool_record["result"][:200]},
     )
+
+    # 3. CRITICAL: You MUST return the incremented iteration so LangGraph can save it!
     return {
         "collected_context": new_context,
-        "tool_history": [tool_record],
+        "tool_history": [tool_record],  # Appended seamlessly if using a list reducer
+        "iteration": next_iteration,  # <-- Save state update
         "last_thought": thought,
         "trace": [thought],
     }
@@ -438,7 +445,7 @@ def respond_step_agent(state: StepState) -> StepAnswerOutput:
 
 def route_step_agent(state: StepState) -> str:
     tool_history = state["tool_history"]
-    iteration = state["iteration"]
+    iteration = state.get("iteration", 0)
     last = tool_history[-1]["decision"] if tool_history else {}
     action = last.get("action", "finish")
 
@@ -564,14 +571,38 @@ def answer_parallel_agent(state: PlannerState) -> NodeOutput:
 
 
 def synthesize_agent(state: PlannerState) -> NodeOutput:
+    # If using tool_batch_answer_generator, state['sub_answers'] will contain
+    # a list of the dictionary structures returned by your batch generator
+    sub_answers_data = state.get("sub_answers", [])
+    question = state["question"]
+
+    flat_answers = []
+    master_sources = {}
+
+    # 1. Deduplicate source chunks and compile answers using native iteration loops
+    for entry in sub_answers_data:
+        if isinstance(entry, dict) and "answer" in entry:
+            flat_answers.append(entry["answer"])
+            # Merge sources mapping dictionary safely
+            step_sources = entry.get("sources", {})
+            for page, snippet in step_sources.items():
+                if page and snippet:
+                    master_sources[page] = snippet
+        elif isinstance(entry, str):
+            # Fallback wrapper string compatibility handling
+            flat_answers.append(entry)
+
+    # 2. Invoke the token-minimized LLM text synthesizer tool
     result = tool_answer_synthesizer(
-        original_question=state["question"],
-        sub_answers=state["sub_answers"],
+        original_question=question,
+        sub_answers=flat_answers,
+        sources_catalog=master_sources,
         strictness=state["strictness"],
     )
+
     thought = rag_thought(
         "answer_synthesis",
-        f"Synthesized {len(state['sub_answers'])} sub-answers",
+        f"Synthesized compiled pipeline output utilizing {len(master_sources)} target source quotes.",
         {"length": len(result["full_context"])},
     )
     return {

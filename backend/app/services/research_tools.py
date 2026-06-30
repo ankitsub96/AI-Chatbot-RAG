@@ -283,7 +283,16 @@ def tool_answer_generator(
             "role": "system",
             "content": (
                 f"You are a document research assistant.\n{strictness_instruction}\n"
-                f"Memory context:\n{memory_context or 'None'}"
+                f"Memory context:\n{memory_context or 'None'}\n\n"
+                "CRITICAL CITATION REQUIREMENT:\n"
+                "The provided Context contains explicit source markers formatted like '[PAGE: 616]' or '[PARENT: parent_3339_page_616]'.\n"
+                "Do NOT use inline tags like '[PAGE: 616]' in your text. Instead, use numbered footnotes like, [2] "
+                "within your response sentences. Then, at the very bottom of your answer under a 'Sources:' header, "
+                "map those numbers to their original bracketed source identifiers. \n\n"
+                "Example format:\n"
+                "The cult is located in Nal Gorgoth [1].\n\n"
+                "Sources:\n"
+                "[1] PAGE: 616"
             ),
         },
         {"role": "user", "content": (f"Context:\n{context}\n\nQuestion:\n{question}")},
@@ -317,9 +326,15 @@ def tool_answer_generator(
 def tool_answer_synthesizer(
     original_question: str,
     sub_answers: list[str],
+    sources_catalog: dict[str, str],  # Maps: {"Page 514": "Verbatim quote..."}
     strictness: StrictnessLevel = "balanced",
 ) -> ToolResult:
     combined = "\n\n".join(f"Sub-answer {i+1}:\n{a}" for i, a in enumerate(sub_answers))
+
+    # Format the lightweight catalog overview for prompt ingestion
+    catalog_block = "\n".join(
+        f'- {page}: "{quote}"' for page, quote in sources_catalog.items()
+    )
 
     strictness_instruction = {
         "strict": "Synthesize only from the sub-answers provided. Do not add external knowledge.",
@@ -331,15 +346,26 @@ def tool_answer_synthesizer(
         {
             "role": "system",
             "content": (
-                f"You are a research synthesizer. Don't mention multiple answers/sub-answers are used to synthesise final answer, or your lack of context\n{strictness_instruction}"
+                "You are an expert research synthesizer. Merge the provided sub-answers into a single comprehensive, fluid text.\n"
+                f"{strictness_instruction}\n\n"
+                "CITATION HANDLING AND VERIFICATION REQUIREMENT:\n"
+                "You are provided a highly specific 'Sources Catalog' containing exact 1-2 line verbatim verification text snippets.\n"
+                "1. If the user explicitly asks for details, proof, or page citations inside their question, you MUST "
+                "provide the source text directly inside your body paragraph narrative layout (e.g., '...as noted on Page 514, \"Murtagh was forced to eat slop\"').\n"
+                "2. If the user did not ask for deep textual quotes inline, keep your main paragraphs clean. "
+                "Instead, at the absolute end of your response under a 'Sources:' header, print the reference pages along with the matching 1-2 line quotes from the catalog.\n\n"
+                "Example formatting for standard end grouping:\n"
+                "Alín provided food to Murtagh, providing relief from his capture.\n\n"
+                "Sources:\n"
+                '- Page 514: "She provides him with food, a welcome respite from the slop..."'
             ),
         },
         {
             "role": "user",
             "content": (
                 f"Original question:\n{original_question}\n\n"
-                f"Sub-answers:\n{combined}\n\n"
-                "Synthesize a single coherent final answer."
+                f"Available Sources Catalog:\n{catalog_block or 'None'}\n\n"
+                f"Sub-answers to compile:\n{combined}"
             ),
         },
     ]
@@ -348,9 +374,9 @@ def tool_answer_synthesizer(
         response = generate_response(messages=prompt, temperature=0)
         answer = response.choices[0].message.content.strip()
     except Exception as e:
-        answer = sub_answers[0] if sub_answers else f"Synthesis failed: {e}"
+        answer = combined if combined else f"Synthesis failed: {e}"
 
-    summary = f"Synthesized {len(sub_answers)} sub-answers"
+    summary = f"Synthesized sub-answers with explicit source text validation data maps"
     truncated = summary + " | " + answer[:300]
 
     return ToolResult(
@@ -359,7 +385,7 @@ def tool_answer_synthesizer(
         summary=summary,
         top_chunks=[],
         full_context=answer,
-        data={"sub_answer_count": len(sub_answers)},
+        data={"source_catalog_count": len(sources_catalog)},
         truncated_result=truncated,
     )
 
@@ -492,9 +518,10 @@ def tool_batch_answer_generator(
     step_contexts: list[str],
     memory_context: str = "",
     strictness: StrictnessLevel = "balanced",
-) -> dict[int, str]:
-    """Attempts all step answers in a single call. Returns {index: answer}
-    only for steps the model actually answered — caller falls back for the rest."""
+) -> dict[int, dict]:
+    """Attempts all step answers in a single call.
+    Returns {index: {"answer": str, "sources": {"Page X": "Exact 1-2 line quote"}}}
+    """
     strictness_instruction = {
         "strict": "Answer ONLY from the document context. If not found, say so.",
         "balanced": "Prefer document context. You may use general knowledge to connect ideas.",
@@ -513,9 +540,20 @@ def tool_batch_answer_generator(
                 "You are a document research assistant answering multiple sub-questions in one pass.\n"
                 f"{strictness_instruction}\n"
                 f"Memory context:\n{memory_context or 'None'}\n\n"
-                "Respond with ONLY a JSON object, no markdown fences, shaped exactly like: "
-                '{"0": "answer to step 0", "1": "answer to step 1", ...}. '
-                "Keys are the step numbers as strings. If you cannot answer a step, omit its key."
+                "CRITICAL INSTRUCTION:\n"
+                "For every question you can answer, you must track the exact text sources. "
+                "The source contexts contain tags like '[PAGE: 514]'. You must extract a 1-2 line verbatim quote "
+                "supporting your assertions.\n\n"
+                "Return a raw JSON object string (NO markdown code blocks/fences) matching this schema:\n"
+                "{\n"
+                '  "0": {\n'
+                '    "answer": "Your detailed fluid answer text...",\n'
+                '    "sources": {\n'
+                '      "Page 514": "Verbatim 1-2 line text extracted from the document context regarding this fact."\n'
+                "    }\n"
+                "  }\n"
+                "}\n"
+                "Keys must be step index numbers as strings. If you cannot answer a step from the context, omit its key entirely."
             ),
         },
         {"role": "user", "content": steps_block},
@@ -531,9 +569,16 @@ def tool_batch_answer_generator(
         raw = response.choices[0].message.content.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(raw)
-        return {
-            int(k): v for k, v in parsed.items() if isinstance(v, str) and v.strip()
-        }
+
+        # Format validate output data maps
+        validated_results = {}
+        for k, v in parsed.items():
+            if isinstance(v, dict) and "answer" in v and "sources" in v:
+                validated_results[int(k)] = {
+                    "answer": v["answer"],
+                    "sources": {str(sk): str(sv) for sk, sv in v["sources"].items()},
+                }
+        return validated_results
     except Exception as e:
         print(f"[tool_batch_answer_generator] batch call failed: {e}")
         return {}
